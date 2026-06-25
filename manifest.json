@@ -1,14 +1,17 @@
 {
   "manifest_version": 3,
   "name": "Copy Edit — inline diff",
-  "version": "0.1.0",
-  "description": "Click to edit any page text inline, then toggle a Review mode that shows an inline diff (insertions/deletions) of your changes. Export a change report.",
+  "version": "0.2.0",
+  "description": "Edit any page text inline from a side panel, see a live list of changes with inline diffs, and share a machine-readable changeset a developer or coding agent can re-apply.",
   "action": {
-    "default_title": "Copy Edit: toggle inline editing on this page"
+    "default_title": "Copy Edit: open the editor side panel"
   },
   "background": {
     "service_worker": "background.js"
   },
-  "permissions": ["scripting", "activeTab", "storage"],
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "permissions": ["scripting", "activeTab", "storage", "sidePanel"],
   "host_permissions": ["http://*/*", "https://*/*"]
 }

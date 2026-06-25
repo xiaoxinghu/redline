@@ -1,34 +1,24 @@
-// Service worker (MV3). Injects the tool on toolbar click.
-// Re-clicking re-runs content.js, which toggles the tool off if already active.
+// Service worker (MV3).
+//
+// The UI now lives in a Side Panel (sidepanel.html). Clicking the toolbar icon
+// opens the panel; the panel itself injects content.js into the active tab and
+// drives it over messaging. The only jobs left here are:
+//   1. Make the toolbar icon open the side panel.
+//   2. "Open & apply": open a changeset's target URL and inject the tool so it
+//      auto-applies the stashed changeset on boot.
 
 const RESTRICTED = /^(chrome|edge|brave|about|chrome-extension|moz-extension|view-source|devtools):/i;
+const isRestricted = (url) =>
+  RESTRICTED.test(url || "") || /https:\/\/chrome\.google\.com\/webstore/.test(url || "");
 
-chrome.action.onClicked.addListener(async (tab) => {
-  if (!tab || !tab.id) return;
+// Open the side panel when the user clicks the toolbar icon.
+chrome.sidePanel
+  .setPanelBehavior({ openPanelOnActionClick: true })
+  .catch((err) => console.error("[Copy Edit] setPanelBehavior failed:", err));
 
-  // Chrome blocks script injection on its own pages and the Web Store.
-  if (RESTRICTED.test(tab.url || "") || /https:\/\/chrome\.google\.com\/webstore/.test(tab.url || "")) {
-    chrome.action.setTitle({
-      tabId: tab.id,
-      title: "Copy Edit can't run on this page (restricted URL).",
-    });
-    return;
-  }
-
-  try {
-    await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      files: ["content.js"],
-    });
-  } catch (err) {
-    console.error("[Copy Edit] injection failed:", err);
-  }
-});
-
-// "Open & apply": the content script (on a non-matching page) stashes a pending
-// changeset and asks us to open its target URL. We open the tab AND inject the
-// tool once the page finishes loading, so it auto-applies on boot. (activeTab
-// can't cover a programmatically opened tab — hence host_permissions.)
+// "Open & apply": the side panel stashed a pending changeset whose target URL
+// differs from the current tab. Open that URL and inject the tool once it has
+// loaded, so maybeApplyPending() re-applies the changeset on boot.
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg && msg.type === "copyedit-open-and-apply" && msg.url) {
     openAndApply(msg.url);
@@ -37,7 +27,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 async function openAndApply(url) {
-  if (RESTRICTED.test(url) || /https:\/\/chrome\.google\.com\/webstore/.test(url)) {
+  if (isRestricted(url)) {
     console.warn("[Copy Edit] can't auto-apply on a restricted URL:", url);
     return;
   }
@@ -51,8 +41,6 @@ async function openAndApply(url) {
   }
   const tabId = tab.id;
 
-  // Inject only after the new tab has finished loading, so content.js can
-  // snapshot the live DOM and maybeApplyPending() finds the stashed changeset.
   const onUpdated = (updatedTabId, info) => {
     if (updatedTabId !== tabId || info.status !== "complete") return;
     chrome.tabs.onUpdated.removeListener(onUpdated);
