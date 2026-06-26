@@ -21,47 +21,30 @@
         <span id="status" class="status">—</span>
       </div>
 
-      <div class="seg" role="tablist" aria-label="Mode">
-        <button id="mode-edit" class="seg-btn is-active" data-mode="edit" role="tab" aria-selected="true">
-          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
-          Edit
-        </button>
-        <button id="mode-review" class="seg-btn" data-mode="review" role="tab" aria-selected="false">
-          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
-          Review
-        </button>
-      </div>
-
       <div class="actions">
-        <button id="share" class="act" title="Download the changeset & copy it to the clipboard">
-          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 13.5 6.8 4M15.4 6.5l-6.8 4"/></svg>
-          Share
-        </button>
-        <button id="import" class="act" title="Apply a changeset from a file">
+        <button id="export" class="act" title="Download the whole-site session & copy it to the clipboard">
           <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>
+          Export
+        </button>
+        <button id="import" class="act" title="Apply a session file">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></svg>
           Import
+        </button>
+        <button id="clear" class="act ghost" title="Clear all saved changes for this site">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>
+          Clear
         </button>
       </div>
     </header>
 
-    <!-- ============================== Banner =============================== -->
-    <div id="banner" class="banner" hidden></div>
-
     <!-- ============================== Content ============================== -->
-    <div id="list-header" class="list-header" hidden></div>
     <main id="list" class="list"></main>
 
     <!-- States -->
     <div id="empty" class="state" hidden>
       <div class="state-art">✎</div>
       <p class="state-title">No changes yet</p>
-      <p class="state-sub">Click any text on the page and start typing. Your edits show up here.</p>
-    </div>
-    <div id="idle" class="state" hidden>
-      <div class="state-art">⏻</div>
-      <p class="state-title">Editing stopped</p>
-      <p class="state-sub">The page markup was removed. Reload the page (⌘R / Ctrl R) to reset.</p>
-      <button id="start" class="primary">Start editing this page</button>
+      <p class="state-sub">Click any text on the page and start typing. Edits are saved per site and reappear as you browse.</p>
     </div>
     <div id="blocked" class="state" hidden>
       <div class="state-art">⊘</div>
@@ -71,7 +54,7 @@
   </div>
 
   <!-- Drag-and-drop overlay -->
-  <div id="drop" class="drop" hidden><div class="drop-box">Drop a <u>.copyedit.json</u> to apply</div></div>
+  <div id="drop" class="drop" hidden><div class="drop-box">Drop a <u>.copyedit-session.json</u> to apply</div></div>
 
   <!-- Toasts -->
   <div id="toasts" class="toasts"></div>

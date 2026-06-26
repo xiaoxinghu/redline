@@ -1,22 +1,30 @@
 // content.js — the in-page engine. Injected by the side panel (sidepanel.js)
 // into the active tab. It owns everything that must touch the page DOM:
-// snapshotting text, two-mode editing, the inline diff, applying imported
-// changesets, and building the export changeset. It has NO visible UI of its
-// own — the toolbar and change list live in the side panel, which drives this
-// engine over messaging.
+// snapshotting pristine text, the three view modes, applying a saved session's
+// edits, and persisting this page's edits back to storage. Its only visible UI
+// is a small floating mode toggle pinned to the corner of the page — two
+// buttons that switch between the three modes (see "Floating control" below).
+// The cross-page change list lives in the side panel, which drives this engine
+// over messaging.
+//
+// SESSIONS (per origin, persisted in chrome.storage.local under copyedit_sessions)
+//   { "<origin>": { mode, pages: { "<pathname>": { title, url, updatedAt,
+//                                                   changes:[{element,original,edited}] } } } }
+//   On boot we snapshot the pristine page, then re-apply this page's saved
+//   changes. Edits made here are written back (debounced). Closing the panel
+//   tears the engine down and restores the pristine page — the session stays in
+//   storage and re-applies next time.
+//
+// MODES (persisted per origin)
+//   edit    : designMode on  + clicks intercepted — type in place, plain text.
+//   preview : designMode off + clicks live        — edits applied, site usable.
+//   diff    : designMode off + clicks intercepted — inline <ins>/<del> overlay.
+//   ("stopped" isn't a mode — it's simply the panel being closed.)
 //
 // MESSAGING
 //   panel → engine   chrome.tabs.sendMessage(tabId, { cmd, ... })
-//       getState | setMode | export | import | locate | teardown
-//   engine → panel   chrome.runtime.sendMessage({ type: "ce:update", ... })
-//       (live list of changes, current mode, page info)
-//
-// MODES
-//   Edit   : document.designMode = "on" — edit text in place, no diff markup.
-//   Review : editing off; each changed text run renders inline <ins>/<del>.
-//
-// Re-injecting this file while it's already active is a no-op: it just re-pushes
-// the current state to the panel (so re-opening / tab-switching stays in sync).
+//       getState | setMode | locate | remove | reset | teardown
+//   engine → panel   chrome.runtime.sendMessage({ type: "ce:update" | "ce:gone", ... })
 
 (function () {
   "use strict";
@@ -29,22 +37,23 @@
 
   const UI_ATTR = "data-ce-ui";
   const ID_ATTR = "data-ce-id";
-  const FORMAT = "copy-edit-changeset";
-  const FORMAT_VERSION = 1;
+  const SESSIONS_KEY = "copyedit_sessions";
   const SKIP_TAGS = new Set([
     "SCRIPT", "STYLE", "NOSCRIPT", "TEXTAREA", "CODE", "PRE", "SVG", "CANVAS",
   ]);
 
-  const originals = new Map();   // id -> original text (fixed at snapshot)
-  const currents = new Map();    // id -> current edited text
+  const ORIGIN = location.origin;
+  const PATH = location.pathname;
+
+  const originals = new Map();   // id -> pristine text (fixed at snapshot)
+  const currents = new Map();    // id -> edited text we want to show
   const spans = new Map();       // id -> wrapper <span>
   const descriptors = new Map(); // id -> element identity (computed pristine)
+  let orphans = [];              // saved changes that couldn't be applied here
 
-  const state = { mode: "edit" };
+  let mode = "edit";             // edit | preview | diff
+  let preDiffMode = "edit";       // mode to return to when the Diff switch is off
   let idCounter = 0;
-  let unmatchedRows = [];         // "not found" rows from the last import
-  let panelHeader = null;         // header override from the last import
-  let panelWarn = null;           // page-mismatch warning from the last import
 
   // ======================================================================
   // Element identity helpers (computed on the PRISTINE DOM, pre-wrapping)
@@ -183,6 +192,7 @@
       span.className = "ce-track";
       span.textContent = tn.nodeValue;
       originals.set(id, tn.nodeValue);
+      currents.set(id, tn.nodeValue);
       descriptors.set(id, desc);
       spans.set(id, span);
       tn.parentNode.replaceChild(span, tn);
@@ -228,14 +238,9 @@
     return merged;
   }
 
-  /** Token diff (for the panel to render safely as DOM, not HTML). */
-  function diffTokensFor(original, current) {
-    return diffTokens(tokenize(original), tokenize(current));
-  }
-
   function diffFragment(original, current) {
     const frag = document.createDocumentFragment();
-    for (const p of diffTokensFor(original, current)) {
+    for (const p of diffTokens(tokenize(original), tokenize(current))) {
       if (p.op === "=") frag.appendChild(document.createTextNode(p.text));
       else {
         const el = document.createElement(p.op === "+" ? "ins" : "del");
@@ -247,111 +252,50 @@
     return frag;
   }
 
-  function diffPreview(original, current) {
-    return diffTokensFor(original, current).map((p) =>
-      p.op === "=" ? p.text : p.op === "+" ? `[+${p.text}]` : `[-${p.text}]`
-    ).join("");
-  }
-
   // ======================================================================
-  // 3. Modes
+  // 3. Storage (per-origin sessions)
   // ======================================================================
-  // The current text of a span depends on the mode: in Edit mode the live
-  // DOM text is authoritative; in Review mode the span holds diff markup, so
-  // the text captured when we entered Review (`currents`) is authoritative.
-  function currentText(id) {
-    if (state.mode === "review") return currents.has(id) ? currents.get(id) : originals.get(id);
-    const span = spans.get(id);
-    return span ? span.textContent : originals.get(id);
+  function storageGet(key) {
+    return new Promise((res) => { try { chrome.storage.local.get(key, (r) => res(r || {})); } catch { res({}); } });
+  }
+  function storageSet(obj) {
+    return new Promise((res) => { try { chrome.storage.local.set(obj, res); } catch { res(); } });
+  }
+  async function getSessions() {
+    const r = await storageGet(SESSIONS_KEY);
+    return r[SESSIONS_KEY] || {};
   }
 
-  function changedIds() {
-    const ids = [];
-    for (const [id, original] of originals) {
-      if (currentText(id) !== original) ids.push(id);
-    }
-    return ids;
-  }
-
-  function enterEdit() {
-    for (const [id, span] of spans) {
-      if (currents.has(id)) span.textContent = currents.get(id);
-    }
-    document.designMode = "on";
-    document.documentElement.classList.remove("ce-review-mode");
-    state.mode = "edit";
-    pushUpdate();
-  }
-
-  function enterReview() {
-    document.designMode = "off";
-    for (const [id, span] of spans) {
-      const current = span.textContent;   // Edit mode keeps the live text here
-      currents.set(id, current);          // always re-capture (fixes lost re-edits)
-      const original = originals.get(id);
-      span.textContent = "";
-      if (current === original) span.textContent = current;
-      else span.appendChild(diffFragment(original, current));
-    }
-    document.documentElement.classList.add("ce-review-mode");
-    state.mode = "review";
-    pushUpdate();
-  }
-
-  // ======================================================================
-  // 4. Export changeset (the developer-facing data file)
-  // ======================================================================
-  function buildChangeset() {
-    const ids = changedIds();
-    const changes = ids.map((id, i) => {
-      const original = originals.get(id);
-      const edited = currentText(id);
-      return {
-        index: i + 1,
-        original,
-        edited,
-        diffPreview: diffPreview(original, edited),
-        element: descriptors.get(id),
-      };
-    });
-
-    return {
-      format: FORMAT,
-      version: FORMAT_VERSION,
-      readme:
-        "Copy-edit changeset. Each entry is a text change a content editor made on the live page. " +
-        "To re-apply/visualise: open the same URL, open the Copy Edit side panel, and Import this file. " +
-        "To locate in source code: search the codebase for the exact `original` string. " +
-        "`element.selector`/`element.domPath` give the DOM location; `element.id`, `element.classes`, " +
-        "`element.componentHint`, `element.attributes` (incl. data-testid/data-component) and " +
-        "`element.context.nearestHeading` help identify the React component that renders it.",
-      page: {
-        url: location.href,
-        origin: location.origin,
-        path: location.pathname,
+  // Write this page's current edits (plus any unresolved saved edits) back into
+  // the origin's session, and remember the current mode for next time.
+  async function persist() {
+    const changes = buildPageChanges(); // capture synchronously (safe if maps clear after)
+    const sessions = await getSessions();
+    const session = sessions[ORIGIN] || { mode, pages: {} };
+    session.mode = mode;
+    if (changes.length) {
+      session.pages[PATH] = {
         title: document.title,
-        lang: document.documentElement.lang || null,
-        viewport: { width: innerWidth, height: innerHeight },
-        capturedAt: new Date().toISOString(),
-      },
-      summary: {
-        changeCount: changes.length,
-        distinctOriginals: [...new Set(changes.map((c) => c.original))],
-      },
-      changes,
-    };
+        url: location.href.split("#")[0],
+        updatedAt: Date.now(),
+        changes,
+      };
+    } else {
+      delete session.pages[PATH];
+    }
+    sessions[ORIGIN] = session;
+    await storageSet({ [SESSIONS_KEY]: sessions });
   }
 
   // ======================================================================
-  // 5. Import changeset (developer side: re-apply + visualise)
+  // 4. Apply a saved session to this page
   // ======================================================================
   function safeQueryAll(sel) {
     if (!sel) return [];
     try { return [...document.querySelectorAll(sel)]; } catch { return []; }
   }
 
-  function resolveElement(change) {
-    const el = change.element || {};
+  function resolveElement(el) {
     let m = safeQueryAll(el.selector);
     if (m.length === 1) return m[0];
     const byPath = safeQueryAll(el.domPath);
@@ -360,13 +304,15 @@
     return null;
   }
 
-  function findSpan(el, change) {
-    const ti = change.element?.textIndex ?? 0;
-    if (el) {
-      const direct = [...el.children].filter((c) => c.matches?.("span.ce-track"));
+  function findSpanForChange(change) {
+    const el = change.element || {};
+    const target = resolveElement(el);
+    const ti = el.textIndex ?? 0;
+    if (target) {
+      const direct = [...target.children].filter((c) => c.matches?.("span.ce-track"));
       const hit = direct[ti];
       if (hit && originals.get(hit.getAttribute(ID_ATTR)) === change.original) return hit;
-      for (const s of el.querySelectorAll("span.ce-track")) {
+      for (const s of target.querySelectorAll("span.ce-track")) {
         if (originals.get(s.getAttribute(ID_ATTR)) === change.original) return s;
       }
     }
@@ -378,117 +324,271 @@
     return count === 1 ? found : null;
   }
 
-  function importChangeset(data) {
-    if (state.mode === "review") enterEdit();
-    const results = [];
-    for (const change of data.changes || []) {
-      const el = resolveElement(change);
-      const span = findSpan(el, change);
-      if (span) {
-        span.textContent = change.edited;  // DOM is the source of truth in Edit mode
-        results.push({ status: "matched", change, span });
+  // Seed `currents` from saved changes. Anything we can't place (element gone or
+  // its text no longer matches the saved original) becomes an "orphan" — kept in
+  // storage and surfaced in the panel as a warning, but not applied to the page.
+  function applySaved(changes) {
+    orphans = [];
+    for (const change of changes || []) {
+      const span = findSpanForChange(change);
+      if (span && originals.get(span.getAttribute(ID_ATTR)) === change.original) {
+        currents.set(span.getAttribute(ID_ATTR), change.edited);
       } else {
-        results.push({ status: "unmatched", change, span: null });
+        orphans.push({ element: change.element || {}, original: change.original, edited: change.edited });
       }
     }
-    enterReview();
-    const matched = results.filter((r) => r.status === "matched").length;
-    // Remember the "not found" rows + headline so the panel can surface them.
-    unmatchedRows = results
-      .filter((r) => r.status === "unmatched")
-      .map((r) => ({
-        status: "unmatched",
-        id: null,
-        original: r.change.original,
-        edited: r.change.edited,
-        diff: diffTokensFor(r.change.original, r.change.edited),
-        element: r.change.element || {},
-      }));
-    panelHeader = `Imported ${matched}/${results.length} changes`;
-    panelWarn =
-      data.page && data.page.path && data.page.path !== location.pathname
-        ? `changeset was captured on "${data.page.path}" — you are on "${location.pathname}"`
-        : null;
+  }
+
+  // ======================================================================
+  // 5. Modes
+  // ======================================================================
+  const INTERCEPT_TYPES =
+    ["pointerdown", "mousedown", "pointerup", "mouseup", "click", "auxclick", "dblclick", "submit"];
+  let intercepting = false;
+  let interceptHandler = null;
+  function setInterception(on) {
+    if (on === intercepting) return;
+    if (on) {
+      interceptHandler = (e) => {
+        const t = e.target;
+        if (t && t.closest && t.closest(`[${UI_ATTR}]`)) return;
+        e.stopImmediatePropagation();
+        if (e.type === "click" || e.type === "auxclick" || e.type === "submit") e.preventDefault();
+      };
+      for (const ty of INTERCEPT_TYPES) window.addEventListener(ty, interceptHandler, true);
+    } else if (interceptHandler) {
+      for (const ty of INTERCEPT_TYPES) window.removeEventListener(ty, interceptHandler, true);
+      interceptHandler = null;
+    }
+    intercepting = on;
+  }
+
+  function renderPlain() {
+    document.documentElement.classList.remove("ce-review-mode");
+    for (const [id, span] of spans) {
+      const t = currents.get(id);
+      if (span.textContent !== t) span.textContent = t;
+    }
+  }
+
+  function renderDiff() {
+    for (const [id, span] of spans) {
+      const cur = currents.get(id);
+      const orig = originals.get(id);
+      span.textContent = "";
+      if (cur === orig) span.textContent = cur;
+      else span.appendChild(diffFragment(orig, cur));
+    }
+    document.documentElement.classList.add("ce-review-mode");
+  }
+
+  // While editing, the live DOM text is authoritative; capture it into `currents`
+  // before we leave Edit so Preview/Diff render what was typed.
+  function captureEdits() {
+    for (const [id, span] of spans) currents.set(id, span.textContent);
+  }
+
+  function enterEdit() {
+    const root = document.documentElement.classList;
+    root.remove("ce-review-mode");
+    root.add("ce-edit-mode");
+    for (const [id, span] of spans) {
+      if (span.textContent !== currents.get(id)) span.textContent = currents.get(id);
+    }
+    document.designMode = "on";
+    setInterception(true);
+    mode = "edit";
+  }
+
+  function enterPreview() {
+    if (mode === "edit") captureEdits();
+    document.documentElement.classList.remove("ce-edit-mode");
+    document.designMode = "off";
+    setInterception(false);
+    renderPlain();
+    mode = "preview";
+  }
+
+  function enterDiff() {
+    if (mode !== "diff") preDiffMode = mode;
+    if (mode === "edit") captureEdits();
+    document.documentElement.classList.remove("ce-edit-mode");
+    document.designMode = "off";
+    setInterception(true);
+    renderDiff();
+    mode = "diff";
+  }
+
+  function enterMode(next) {
+    if (next === "preview") enterPreview();
+    else if (next === "diff") enterDiff();
+    else enterEdit();
+  }
+
+  async function setMode(next) {
+    if (next === mode) return;
+    enterMode(next);
+    await persist();
     pushUpdate();
   }
 
   // ======================================================================
-  // 6. Receive a changeset + location-aware apply.
+  // 6. Current text / changes
   // ======================================================================
-  const PENDING_KEY = "copyedit_pending";
-
-  function matchUrl(page) {
-    if (!page) return false;
-    if (page.origin && page.origin !== location.origin) return false;
-    if (page.path) return page.path === location.pathname;
-    return true;
-  }
-
-  function storageSet(obj) {
-    return new Promise((res) => { try { chrome.storage.local.set(obj, res); } catch { res(); } });
-  }
-  function storageGet(key) {
-    return new Promise((res) => { try { chrome.storage.local.get(key, (r) => res(r || {})); } catch { res({}); } });
-  }
-  function storageRemove(key) { try { chrome.storage.local.remove(key); } catch {} }
-
-  /** Returns a response object for the panel (does not render anything). */
-  function handleIncomingChangeset(data) {
-    if (!data || data.format !== FORMAT) {
-      return { ok: false, error: "That isn't a Copy Edit changeset." };
+  function currentText(id) {
+    if (mode === "edit") {
+      const span = spans.get(id);
+      return span ? span.textContent : originals.get(id);
     }
-    if (matchUrl(data.page)) {
-      importChangeset(data);
-      return { ok: true, applied: true };
-    }
-    // Different page → stash it; the panel offers "Open & apply", which asks the
-    // background worker to open the target URL and inject the tool there, where
-    // maybeApplyPending() re-applies the stashed changeset on boot (10 min TTL).
-    storageSet({ [PENDING_KEY]: { data, ts: Date.now() } });
-    return { ok: true, needsOpen: true, page: data.page || {} };
+    return currents.has(id) ? currents.get(id) : originals.get(id);
   }
 
-  async function maybeApplyPending() {
-    const r = await storageGet(PENDING_KEY);
-    const pending = r[PENDING_KEY];
-    if (!pending || !pending.data) return;
-    if (Date.now() - (pending.ts || 0) > 10 * 60 * 1000) { storageRemove(PENDING_KEY); return; }
-    if (matchUrl(pending.data.page)) {
-      storageRemove(PENDING_KEY);
-      importChangeset(pending.data);
+  function changedIds() {
+    const ids = [];
+    for (const [id, original] of originals) {
+      if (currentText(id) !== original) ids.push(id);
     }
+    return ids;
+  }
+
+  // For storage: applied edits on this page + any unresolved saved edits.
+  function buildPageChanges() {
+    const applied = changedIds().map((id) => ({
+      element: descriptors.get(id),
+      original: originals.get(id),
+      edited: currentText(id),
+    }));
+    return applied.concat(orphans);
+  }
+
+  // For the panel: current-page rows with live status + ids for Locate.
+  function buildRows() {
+    const rows = changedIds().map((id) => ({
+      id,
+      status: "applied",
+      original: originals.get(id),
+      edited: currentText(id),
+      element: descriptors.get(id),
+    }));
+    const warn = orphans.map((c) => ({
+      id: null,
+      status: "warning",
+      original: c.original,
+      edited: c.edited,
+      element: c.element || {},
+    }));
+    return rows.concat(warn);
   }
 
   // ======================================================================
-  // 7. Panel bridge — push the live change list to the side panel.
+  // 7. Panel bridge
   // ======================================================================
   function send(msg) {
     try { chrome.runtime.sendMessage(msg, () => void chrome.runtime.lastError); } catch {}
   }
 
-  function buildRows() {
-    const rows = changedIds().map((id) => ({
-      status: "matched",
-      id,
-      original: originals.get(id),
-      edited: currentText(id),
-      diff: diffTokensFor(originals.get(id), currentText(id)),
-      element: descriptors.get(id),
-    }));
-    return rows.concat(unmatchedRows);
+  // -----------------------------------------------------------------------
+  // Floating control (top-right): drives the three modes with two controls.
+  // The primary button toggles Edit ("Done") ⇄ Preview ("Edit"). The "Diff"
+  // iOS-style switch sits beside it whenever this page has edits: flip it ON to
+  // overlay the inline diff, OFF to return to whichever mode you came from. It
+  // carries UI_ATTR so the snapshot/interception ignore it.
+  let floatEl = null, floatPrimary = null, floatDiff = null, floatSep = null, floatFrame = null, floatFrameText = null;
+
+  function injectFloat() {
+    const wrap = document.createElement("div");
+    wrap.setAttribute(UI_ATTR, "");
+    wrap.id = "ce-float";
+    wrap.setAttribute("contenteditable", "false");
+
+    floatDiff = document.createElement("button");
+    floatDiff.setAttribute(UI_ATTR, "");
+    floatDiff.type = "button";
+    floatDiff.className = "ce-toggle";
+    floatDiff.setAttribute("role", "switch");
+    floatDiff.title = "Toggle an inline diff overlay of every change";
+    const tLabel = document.createElement("span");
+    tLabel.className = "ce-toggle-label";
+    tLabel.textContent = "Diff";
+    const track = document.createElement("span");
+    track.className = "ce-toggle-track";
+    const knob = document.createElement("span");
+    knob.className = "ce-toggle-knob";
+    track.appendChild(knob);
+    floatDiff.append(tLabel, track);
+    floatDiff.addEventListener("click", (e) => {
+      e.preventDefault(); e.stopPropagation();
+      setMode(mode === "diff" ? preDiffMode : "diff");
+    });
+
+    floatPrimary = document.createElement("button");
+    floatPrimary.setAttribute(UI_ATTR, "");
+    floatPrimary.type = "button";
+    floatPrimary.className = "ce-fab ce-fab-primary";
+    floatPrimary.addEventListener("click", (e) => {
+      e.preventDefault(); e.stopPropagation();
+      setMode(floatPrimary.dataset.target || "edit");
+    });
+
+    floatSep = document.createElement("span");
+    floatSep.setAttribute(UI_ATTR, "");
+    floatSep.className = "ce-sep";
+
+    wrap.append(floatPrimary, floatSep, floatDiff);
+
+    // Whole-page "you're in a special mode" cue: a fixed, click-through frame
+    // that glows around the viewport, plus a status pill at the top edge. Color
+    // is driven by the ce-edit-mode / ce-review-mode classes on <html>.
+    floatFrame = document.createElement("div");
+    floatFrame.setAttribute(UI_ATTR, "");
+    floatFrame.id = "ce-frame";
+    const label = document.createElement("span");
+    label.setAttribute(UI_ATTR, "");
+    label.className = "ce-frame-label";
+    const dot = document.createElement("span");
+    dot.className = "ce-frame-dot";
+    floatFrameText = document.createElement("span");
+    floatFrameText.className = "ce-frame-text";
+    label.append(dot, floatFrameText);
+    floatFrame.appendChild(label);
+
+    document.body.append(floatFrame, wrap);
+    return wrap;
+  }
+
+  function renderFloat() {
+    if (!floatPrimary) return;
+    if (mode === "edit") {
+      floatPrimary.textContent = "Done";
+      floatPrimary.dataset.target = "preview";
+      floatPrimary.title = "Done editing — preview the page with your changes applied";
+    } else {
+      floatPrimary.textContent = "Edit";
+      floatPrimary.dataset.target = "edit";
+      floatPrimary.title = "Edit the page text in place";
+    }
+    // "Diff" switch: visible whenever there's something to diff (or we're in
+    // diff mode), ON only while in diff mode.
+    const showDiff = mode === "diff" || changedIds().length > 0;
+    floatDiff.style.display = showDiff ? "" : "none";
+    if (floatSep) floatSep.style.display = showDiff ? "" : "none";
+    floatDiff.classList.toggle("is-on", mode === "diff");
+    floatDiff.setAttribute("aria-checked", String(mode === "diff"));
+    if (floatFrameText) {
+      floatFrameText.textContent =
+        mode === "edit" ? "Editing" : mode === "diff" ? "Reviewing changes" : "";
+    }
   }
 
   function pushUpdate() {
-    const changeCount = changedIds().length;
-    const header =
-      panelHeader || `${changeCount} change${changeCount === 1 ? "" : "s"} on this page`;
+    renderFloat();
     send({
       type: "ce:update",
-      mode: state.mode,
-      changeCount,
-      header,
-      warn: panelWarn,
-      page: { path: location.pathname, url: location.href, title: document.title },
+      origin: ORIGIN,
+      path: PATH,
+      url: location.href,
+      title: document.title,
+      mode,
       rows: buildRows(),
     });
   }
@@ -502,37 +602,39 @@
     return true;
   }
 
-  // Live updates: while editing, recompute the list as the user types.
+  // Live updates: while editing, recompute + persist as the user types.
   let pushTimer = null;
   function onInput() {
-    if (state.mode !== "edit") return;
-    // Editing a span clears its remembered import-diff association; if the user
-    // edits after an import, drop the import headline so the live count shows.
+    if (mode !== "edit") return;
     clearTimeout(pushTimer);
-    pushTimer = setTimeout(() => {
-      panelHeader = null;
-      pushUpdate();
-    }, 250);
+    pushTimer = setTimeout(async () => { await persist(); pushUpdate(); }, 250);
   }
 
   // ======================================================================
-  // 8. Interaction neutralisation
+  // 8. Mutations driven by the panel
   // ======================================================================
-  // While the tool is active, neutralise the page's own click/navigation so the
-  // editor can click on links/buttons just to place the caret and edit their
-  // text. We intercept at the window capture phase and stop propagation. We
-  // don't preventDefault on pointer/mouse-down (so caret placement + dblclick
-  // word-select still work); we only cancel the default for activating events.
-  function interceptInteractions() {
-    const handler = (e) => {
-      const t = e.target;
-      if (t && t.closest && t.closest(`[${UI_ATTR}]`)) return;
-      e.stopImmediatePropagation();
-      if (e.type === "click" || e.type === "auxclick" || e.type === "submit") e.preventDefault();
-    };
-    const types = ["pointerdown", "mousedown", "pointerup", "mouseup", "click", "auxclick", "dblclick", "submit"];
-    for (const ty of types) window.addEventListener(ty, handler, true);
-    return { types, handler };
+  // Revert one applied change (by id) or drop one orphan (by original+edited).
+  async function remove(payload) {
+    if (payload.id != null && spans.has(payload.id)) {
+      currents.set(payload.id, originals.get(payload.id));
+      spans.get(payload.id).textContent = originals.get(payload.id);
+    } else {
+      orphans = orphans.filter(
+        (o) => !(o.original === payload.original && o.edited === payload.edited)
+      );
+    }
+    await persist();
+    pushUpdate();
+  }
+
+  // Clear this page in place (used when the panel wipes the origin's session).
+  // Does NOT persist — the panel has already removed the session from storage.
+  function reset() {
+    for (const [id, original] of originals) currents.set(id, original);
+    orphans = [];
+    if (mode === "diff") renderDiff();
+    else renderPlain();
+    pushUpdate();
   }
 
   // ======================================================================
@@ -547,6 +649,48 @@
       .ce-review-mode .ce-track del.ce-del { background:#ffd9d9; border-radius:2px; box-shadow:0 0 0 1px #f0a9a9 inset; }
       .ce-track.ce-flash { animation: ce-flash-kf 1.8s ease; }
       @keyframes ce-flash-kf { 0%,100%{ box-shadow:none; } 15%,60%{ box-shadow:0 0 0 3px #ffd54a, 0 0 12px 4px #ffd54a; background:#fff7d1; } }
+
+      /* Floating menubar (top-right). Palette mirrors the side panel and adapts
+         to light/dark with prefers-color-scheme, just like the panel does. */
+      #ce-float { --ce-surface:rgba(255,255,255,.92); --ce-line:rgba(20,24,40,.10); --ce-ink:#1b1f2a; --ce-hover:rgba(20,24,40,.06); --ce-track:rgba(20,24,40,.22); --ce-shadow:0 10px 30px rgba(20,24,40,.22); --ce-accent-a:#4c7dff; --ce-accent-b:#6f57ff;
+        position:fixed !important; top:16px !important; right:16px !important; z-index:2147483647 !important; display:inline-flex !important; align-items:center !important; gap:4px !important; margin:0 !important; padding:5px !important; border-radius:14px !important; background:var(--ce-surface) !important; -webkit-backdrop-filter:blur(12px) saturate(1.4); backdrop-filter:blur(12px) saturate(1.4); border:1px solid var(--ce-line) !important; box-shadow:var(--ce-shadow) !important; pointer-events:auto !important; }
+      #ce-float .ce-sep { flex:0 0 auto !important; width:1px !important; align-self:stretch !important; margin:3px 2px !important; background:var(--ce-line) !important; }
+      #ce-float .ce-fab { all:unset; box-sizing:border-box; cursor:pointer !important; display:inline-flex !important; align-items:center !important; justify-content:center !important; min-width:62px; padding:9px 16px !important; border-radius:10px !important; color:#fff !important; font:600 13px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif !important; letter-spacing:.2px; transition:filter .14s ease, transform .05s ease; }
+      #ce-float .ce-fab:hover { filter:brightness(1.08); }
+      #ce-float .ce-fab:active { transform:translateY(1px); }
+      #ce-float .ce-fab-primary { background:linear-gradient(135deg,var(--ce-accent-a),var(--ce-accent-b)) !important; }
+
+      /* iOS-style "Diff" switch (right side of the bar): ON only in diff mode. */
+      #ce-float .ce-toggle { all:unset; box-sizing:border-box; cursor:pointer !important; display:inline-flex !important; align-items:center !important; gap:8px !important; padding:7px 11px !important; border-radius:10px !important; color:var(--ce-ink) !important; font:600 13px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif !important; letter-spacing:.2px; transition:background .14s ease; }
+      #ce-float .ce-toggle:hover { background:var(--ce-hover) !important; }
+      #ce-float .ce-toggle-label { color:var(--ce-ink) !important; }
+      #ce-float .ce-toggle-track { position:relative !important; flex:0 0 auto !important; width:38px !important; height:22px !important; border-radius:999px !important; background:var(--ce-track) !important; transition:background .2s ease; }
+      #ce-float .ce-toggle-knob { position:absolute !important; top:2px !important; left:2px !important; width:18px !important; height:18px !important; border-radius:50% !important; background:#fff !important; box-shadow:0 1px 3px rgba(0,0,0,.3) !important; transition:transform .2s ease; }
+      #ce-float .ce-toggle.is-on .ce-toggle-track { background:linear-gradient(135deg,#f5a623,#f57c00) !important; }
+      #ce-float .ce-toggle.is-on .ce-toggle-knob { transform:translateX(16px); }
+      @media (prefers-color-scheme: dark) {
+        #ce-float { --ce-surface:rgba(28,31,41,.94); --ce-line:rgba(255,255,255,.12); --ce-ink:#eef1f8; --ce-hover:rgba(255,255,255,.08); --ce-track:rgba(255,255,255,.20); --ce-shadow:0 12px 32px rgba(0,0,0,.5); --ce-accent-a:#6b94ff; --ce-accent-b:#6f57ff; }
+      }
+
+      /* Whole-page mode cue: a click-through glowing frame + a top-edge pill. */
+      #ce-frame { position:fixed !important; inset:0 !important; z-index:2147483646 !important; pointer-events:none !important; opacity:0; transition:opacity .25s ease; }
+      .ce-edit-mode #ce-frame, .ce-review-mode #ce-frame { opacity:1; }
+      .ce-edit-mode #ce-frame { animation:ce-frame-breathe 3.4s ease-in-out infinite; }
+      .ce-review-mode #ce-frame { box-shadow: inset 0 0 0 3px rgba(245,160,35,.95), inset 0 0 24px 4px rgba(245,124,0,.30) !important; }
+      @keyframes ce-frame-breathe {
+        0%,100% { box-shadow: inset 0 0 0 3px rgba(108,99,255,.80), inset 0 0 22px 3px rgba(76,125,255,.28); }
+        50%     { box-shadow: inset 0 0 0 3px rgba(124,108,255,1), inset 0 0 44px 9px rgba(76,125,255,.52); }
+      }
+      #ce-frame .ce-frame-label { position:absolute !important; top:0 !important; left:50% !important; transform:translateX(-50%) !important; display:none; align-items:center; gap:7px; padding:6px 15px 7px !important; border-radius:0 0 12px 12px !important; color:#fff !important; font:700 12px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif !important; letter-spacing:.3px !important; white-space:nowrap !important; box-shadow:0 6px 18px rgba(20,24,40,.3) !important; }
+      .ce-edit-mode #ce-frame .ce-frame-label, .ce-review-mode #ce-frame .ce-frame-label { display:flex !important; }
+      .ce-edit-mode #ce-frame .ce-frame-label { background:linear-gradient(135deg,#4c7dff,#6f57ff) !important; }
+      .ce-review-mode #ce-frame .ce-frame-label { background:linear-gradient(135deg,#f5a623,#f57c00) !important; }
+      #ce-frame .ce-frame-dot { width:7px; height:7px; border-radius:50% !important; background:#fff !important; animation:ce-frame-dot 1.6s ease-out infinite; }
+      @keyframes ce-frame-dot { 0%{ box-shadow:0 0 0 0 rgba(255,255,255,.65);} 70%{ box-shadow:0 0 0 6px rgba(255,255,255,0);} 100%{ box-shadow:0 0 0 0 rgba(255,255,255,0);} }
+      @media (prefers-reduced-motion: reduce) {
+        .ce-edit-mode #ce-frame { animation:none; box-shadow: inset 0 0 0 3px rgba(108,99,255,.9), inset 0 0 26px 4px rgba(76,125,255,.4) !important; }
+        #ce-frame .ce-frame-dot { animation:none; }
+      }
     `;
     document.head.appendChild(style);
     return style;
@@ -557,23 +701,22 @@
     switch (msg.cmd) {
       case "getState":
         pushUpdate();
-        sendResponse({ ok: true, mode: state.mode });
+        sendResponse({ ok: true, mode });
         break;
       case "setMode":
-        if (msg.mode === "review") enterReview();
-        else enterEdit();
-        sendResponse({ ok: true, mode: state.mode });
-        break;
-      case "export": {
-        const cs = buildChangeset();
-        sendResponse({ ok: true, changeset: cs, count: (cs.changes || []).length });
-        break;
-      }
-      case "import":
-        sendResponse(handleIncomingChangeset(msg.data));
+        setMode(msg.mode);
+        sendResponse({ ok: true });
         break;
       case "locate":
         sendResponse({ ok: flash(msg.id) });
+        break;
+      case "remove":
+        remove(msg);
+        sendResponse({ ok: true });
+        break;
+      case "reset":
+        reset();
+        sendResponse({ ok: true });
         break;
       case "teardown":
         teardown();
@@ -585,42 +728,51 @@
     // All branches respond synchronously.
   }
 
-  let listeners = null;
+  // Restore the page to its pristine state and unhook everything. The session
+  // stays in storage; this is what "stopped" (panel closed) looks like.
   function teardown() {
-    if (state.mode === "review") {
-      for (const [id, span] of spans) if (currents.has(id)) span.textContent = currents.get(id);
-    }
+    // Best-effort flush of the latest edits before we revert (covers closing the
+    // panel right after a keystroke, before the debounced persist fired).
+    try { persist(); } catch {}
     document.designMode = "off";
-    document.documentElement.classList.remove("ce-review-mode");
+    document.documentElement.classList.remove("ce-review-mode", "ce-edit-mode");
     for (const span of spans.values()) {
-      const text = document.createTextNode(span.textContent);
+      const id = span.getAttribute(ID_ATTR);
+      const text = document.createTextNode(originals.has(id) ? originals.get(id) : span.textContent);
       span.parentNode && span.parentNode.replaceChild(text, span);
     }
-    spans.clear(); originals.clear(); currents.clear(); descriptors.clear();
-    if (listeners) {
-      for (const ty of listeners.intercept.types) {
-        window.removeEventListener(ty, listeners.intercept.handler, true);
-      }
-      document.removeEventListener("input", onInput, true);
-      try { chrome.runtime.onMessage.removeListener(onMessage); } catch {}
-    }
+    spans.clear(); originals.clear(); currents.clear(); descriptors.clear(); orphans = [];
+    setInterception(false);
+    document.removeEventListener("input", onInput, true);
+    try { chrome.runtime.onMessage.removeListener(onMessage); } catch {}
+    floatEl && floatEl.remove();
+    floatFrame && floatFrame.remove();
+    floatEl = floatPrimary = floatDiff = floatSep = floatFrame = floatFrameText = null;
     pageStyle && pageStyle.remove();
     delete window.__copyEditTool;
     send({ type: "ce:gone" });
   }
 
-  try {
+  async function boot() {
     snapshot();
     pageStyle = injectPageStyle();
-    const intercept = interceptInteractions();
+    floatEl = injectFloat();
     document.addEventListener("input", onInput, true);
     chrome.runtime.onMessage.addListener(onMessage);
-    listeners = { intercept };
-    enterEdit();
-    window.__copyEditTool = { teardown, applyChangeset: handleIncomingChangeset, pushUpdate };
-    maybeApplyPending();
-  } catch (err) {
-    console.error("[Copy Edit] failed to start:", err);
-    teardown();
+    window.__copyEditTool = { teardown, pushUpdate };
+
+    const sessions = await getSessions();
+    const session = sessions[ORIGIN];
+    mode = (session && session.mode) || "edit";
+    if (session && session.pages && session.pages[PATH]) {
+      applySaved(session.pages[PATH].changes);
+    }
+    enterMode(mode);
+    pushUpdate();
   }
+
+  boot().catch((err) => {
+    console.error("[Copy Edit] failed to start:", err);
+    try { teardown(); } catch {}
+  });
 })();
