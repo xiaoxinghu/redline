@@ -43,13 +43,14 @@
   ]);
 
   const ORIGIN = location.origin;
-  const PATH = location.pathname;
+  let PATH = location.pathname;  // mutable: same-document (SPA) nav re-points it
 
   const originals = new Map();   // id -> pristine text (fixed at snapshot)
   const currents = new Map();    // id -> edited text we want to show
   const spans = new Map();       // id -> wrapper <span>
   const descriptors = new Map(); // id -> element identity (computed pristine)
   let orphans = [];              // saved changes that couldn't be applied here
+  let savedChanges = [];         // this page's saved edits, for re-applying to late content
 
   let mode = "edit";             // edit | preview | diff
   let preDiffMode = "edit";       // mode to return to when the Diff switch is off
@@ -165,6 +166,10 @@
 
   // ======================================================================
   // 1. Snapshot  (collect → describe pristine → wrap)
+  //
+  // Idempotent: it only wraps text nodes that aren't already tracked, so it can
+  // be re-run to pick up content the page renders late (hydration) or swaps in
+  // on a same-document navigation, without disturbing existing wrappers.
   // ======================================================================
   function snapshot() {
     allHeadings = [...document.querySelectorAll("h1,h2,h3,h4,h5,h6")];
@@ -175,6 +180,7 @@
         const parent = node.parentElement;
         if (!parent || SKIP_TAGS.has(parent.tagName)) return NodeFilter.FILTER_REJECT;
         if (parent.closest(`[${UI_ATTR}]`)) return NodeFilter.FILTER_REJECT;
+        if (parent.closest(".ce-track")) return NodeFilter.FILTER_REJECT; // already tracked
         return NodeFilter.FILTER_ACCEPT;
       },
     });
@@ -269,19 +275,20 @@
   // Write this page's current edits (plus any unresolved saved edits) back into
   // the origin's session, and remember the current mode for next time.
   async function persist() {
-    const changes = buildPageChanges(); // capture synchronously (safe if maps clear after)
+    // Capture page identity + edits synchronously: a same-document (SPA)
+    // navigation can change PATH/location/title before the awaited write below,
+    // which would otherwise file these edits under the wrong page.
+    const path = PATH;
+    const title = document.title;
+    const url = location.href.split("#")[0];
+    const changes = buildPageChanges();
     const sessions = await getSessions();
     const session = sessions[ORIGIN] || { mode, pages: {} };
     session.mode = mode;
     if (changes.length) {
-      session.pages[PATH] = {
-        title: document.title,
-        url: location.href.split("#")[0],
-        updatedAt: Date.now(),
-        changes,
-      };
+      session.pages[path] = { title, url, updatedAt: Date.now(), changes };
     } else {
-      delete session.pages[PATH];
+      delete session.pages[path];
     }
     sessions[ORIGIN] = session;
     await storageSet({ [SESSIONS_KEY]: sessions });
@@ -382,6 +389,13 @@
     document.documentElement.classList.add("ce-review-mode");
   }
 
+  // Re-render the page in whatever mode we're currently in (used after we wrap
+  // newly-rendered content so it shows up immediately).
+  function renderCurrentMode() {
+    if (mode === "diff") renderDiff();
+    else renderPlain(); // edit + preview both show plain current text
+  }
+
   // While editing, the live DOM text is authoritative; capture it into `currents`
   // before we leave Edit so Preview/Diff render what was typed.
   function captureEdits() {
@@ -389,6 +403,11 @@
   }
 
   function enterEdit() {
+    // Capture anything the page rendered since our last snapshot (lazy/hydrated
+    // content), then re-apply this page's saved edits onto any new spans, so the
+    // user edits — and we track — exactly what's on screen right now.
+    snapshot();
+    applySaved(savedChanges);
     const root = document.documentElement.classList;
     root.remove("ce-review-mode");
     root.add("ce-edit-mode");
@@ -632,9 +651,89 @@
   function reset() {
     for (const [id, original] of originals) currents.set(id, original);
     orphans = [];
-    if (mode === "diff") renderDiff();
-    else renderPlain();
+    savedChanges = [];
+    renderCurrentMode();
     pushUpdate();
+  }
+
+  // ======================================================================
+  // 8b. Late content + same-document (SPA) navigation
+  //
+  // The engine snapshots once at injection. Two things break that assumption:
+  //   • Hydration: a site may render its real text just AFTER load, so the
+  //     first snapshot wraps nothing useful. We re-snapshot during a short
+  //     "settle" window and whenever the user enters Edit.
+  //   • SPA routing: a link can swap the page without a reload, so PATH goes
+  //     stale and tabs.onUpdated never fires "complete". We poll location and
+  //     re-initialize for the new path.
+  // ======================================================================
+  let navPoll = null;
+  let settleTimer = null;
+
+  function watchNavigation() {
+    window.addEventListener("popstate", onLocationMaybeChanged, true);
+    navPoll = setInterval(onLocationMaybeChanged, 500);
+  }
+  function unwatchNavigation() {
+    window.removeEventListener("popstate", onLocationMaybeChanged, true);
+    clearInterval(navPoll); navPoll = null;
+    stopSettle();
+  }
+
+  function onLocationMaybeChanged() {
+    if (location.pathname === PATH) return; // unchanged or hash-only
+    if (mode === "edit") captureEdits();
+    try { persist(); } catch {}   // save the page we're leaving (persist captures old PATH)
+    PATH = location.pathname;
+    reinitForPage().catch((err) => console.error("[Copy Edit] re-init failed:", err));
+  }
+
+  // Drop the previous page's tracking (leaving our own UI intact) and rebuild
+  // for the current PATH, re-applying its saved edits and the current mode.
+  async function reinitForPage() {
+    for (const span of spans.values()) {
+      if (!span.isConnected) continue;
+      const id = span.getAttribute(ID_ATTR);
+      const text = document.createTextNode(originals.has(id) ? originals.get(id) : span.textContent);
+      span.parentNode && span.parentNode.replaceChild(text, span);
+    }
+    spans.clear(); originals.clear(); currents.clear(); descriptors.clear(); orphans = [];
+
+    snapshot();
+    const sessions = await getSessions();
+    const session = sessions[ORIGIN];
+    savedChanges = (session && session.pages && session.pages[PATH] && session.pages[PATH].changes) || [];
+    applySaved(savedChanges);
+    enterMode(mode);
+    pushUpdate();
+    startSettle(); // the incoming view may still be rendering
+  }
+
+  // Wrap any text the page has rendered since the last pass. Skips re-applying
+  // saved edits while editing so we never clobber the user's in-progress typing.
+  function augment() {
+    if (mode === "edit") captureEdits();
+    const before = spans.size;
+    snapshot();
+    if (spans.size === before) return; // nothing new
+    if (mode !== "edit") applySaved(savedChanges);
+    renderCurrentMode();
+    pushUpdate();
+  }
+
+  // Re-run augment() a few times over a short window to catch content that
+  // renders progressively after load/navigation.
+  function startSettle(ms = 3000) {
+    stopSettle();
+    const end = Date.now() + ms;
+    const tick = () => {
+      augment();
+      settleTimer = Date.now() < end ? setTimeout(tick, 300) : null;
+    };
+    settleTimer = setTimeout(tick, 200);
+  }
+  function stopSettle() {
+    clearTimeout(settleTimer); settleTimer = null;
   }
 
   // ======================================================================
@@ -743,6 +842,7 @@
     }
     spans.clear(); originals.clear(); currents.clear(); descriptors.clear(); orphans = [];
     setInterception(false);
+    unwatchNavigation();
     document.removeEventListener("input", onInput, true);
     try { chrome.runtime.onMessage.removeListener(onMessage); } catch {}
     floatEl && floatEl.remove();
@@ -760,15 +860,16 @@
     document.addEventListener("input", onInput, true);
     chrome.runtime.onMessage.addListener(onMessage);
     window.__copyEditTool = { teardown, pushUpdate };
+    watchNavigation();
 
     const sessions = await getSessions();
     const session = sessions[ORIGIN];
     mode = (session && session.mode) || "edit";
-    if (session && session.pages && session.pages[PATH]) {
-      applySaved(session.pages[PATH].changes);
-    }
+    savedChanges = (session && session.pages && session.pages[PATH] && session.pages[PATH].changes) || [];
+    if (savedChanges.length) applySaved(savedChanges);
     enterMode(mode);
     pushUpdate();
+    startSettle(); // catch text the page renders just after load (hydration)
   }
 
   boot().catch((err) => {
