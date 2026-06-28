@@ -181,7 +181,9 @@ async function enterTab(tab) {
     showBlocked("No active tab to edit.");
     return;
   }
-  if (isRestricted(tab.url)) {
+  // No readable URL usually means a privileged page (chrome://, web store, etc.)
+  // we have no host access to — treat it the same as an explicitly restricted URL.
+  if (!tab.url || isRestricted(tab.url)) {
     targetTabId = null;
     reportTarget();
     showBlocked("Copy Edit can't run on this page (restricted URL). Open a normal web page and try again.");
@@ -195,7 +197,9 @@ async function enterTab(tab) {
     hideBlocked();
     await sendToTab({ cmd: "getState" });
   } catch (err) {
-    console.error("[Copy Edit] could not start on this tab:", err);
+    // Injection can still fail on pages we couldn't pre-screen (e.g. the URL was
+    // hidden from us). This is expected, not a real fault — keep it quiet.
+    console.warn("[Copy Edit] could not start on this tab:", err);
     showBlocked("Couldn't start Copy Edit on this page.");
   }
 }
