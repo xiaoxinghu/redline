@@ -1,0 +1,12 @@
+{
+  "extends": "./.wxt/tsconfig.json",
+  "compilerOptions": {
+    // This is a faithful JS -> TS port of a DOM-heavy extension. The data
+    // contracts are typed in utils/types.ts; we relax these two checks so the
+    // imperative DOM code doesn't require a `!` / annotation on every line.
+    // Tighten incrementally over time.
+    "noImplicitAny": false,
+    "strictNullChecks": false,
+    "types": ["chrome"]
+  }
+}

@@ -155,11 +155,16 @@ carry the original `original` src plus a `file` pointing at the replacement in
 > gives an agent the strongest possible signals to find it quickly.
 
 ## How it works under the hood
-- The UI is a **side panel page** (`sidepanel.html/.css/.js`). It has no access
-  to the page DOM, so it injects **`content.js`** (the engine) into the active
-  tab and talks to it over messaging (`chrome.tabs.sendMessage` →, `ce:update`
-  ←). The panel renders the toolbar + the live change list; the engine does all
-  DOM work.
+- Built with **[WXT](https://wxt.dev)** (Vite-based). Source lives in
+  `entrypoints/` and is bundled into `.output/chrome-mv3/` — `manifest.json` is
+  **generated** from `wxt.config.ts` + the entrypoints, not hand-written.
+- The UI is a **side panel page** (`entrypoints/sidepanel/`). It has no access
+  to the page DOM, so it injects the **engine** (`entrypoints/engine.ts`, built
+  to `/engine.js`) into the active tab via `chrome.scripting.executeScript` and
+  talks to it over messaging (`chrome.tabs.sendMessage` →, `ce:update` ←). The
+  panel renders the toolbar + the live change list; the engine does all DOM
+  work. The engine is an **unlisted script** — only ever injected on demand,
+  never auto-run on page load.
 - While the tool is active, the page's own **clicks/links/buttons are neutralised**
   (intercepted at the window capture phase) so you can click a link or button
   just to place the caret and edit its text — without triggering navigation or
@@ -175,12 +180,26 @@ carry the original `original` src plus a `file` pointing at the replacement in
   vet). The engine ships diff *tokens* to the panel, which builds `<ins>`/`<del>`
   as DOM (never HTML), so page text can't inject markup into the panel.
 
-## Install (unpacked)
-1. `chrome://extensions` → enable **Developer mode**.
-2. **Load unpacked** → select this folder.
-3. Open `test/sample.html`, click the icon to open the side panel, fix the
+## Develop & build (WXT)
+Requires [Bun](https://bun.sh) (or npm/pnpm).
+
+```sh
+bun install        # installs deps + runs `wxt prepare`
+bun run dev        # launches Chrome with the extension + HMR
+bun run build      # production build -> .output/chrome-mv3/
+bun run compile    # type-check (tsc --noEmit)
+bun run zip        # packaged .zip for the Web Store
+```
+
+### Install (unpacked)
+1. `bun run build`.
+2. `chrome://extensions` → enable **Developer mode**.
+3. **Load unpacked** → select **`.output/chrome-mv3/`**.
+4. Open `test/sample.html`, click the icon to open the side panel, fix the
    typos, switch to **Review**, then **Share**. Open the same file in another
    tab, click the icon, and **Import** (or drag) the file.
+
+> `bun run dev` does the load-unpacked step for you and live-reloads on change.
 
 ## Known limitations (MVP)
 - Best for **editing existing text in place** and **replacing existing `<img>`
@@ -197,18 +216,25 @@ carry the original `original` src plus a `file` pointing at the replacement in
   own mostly-static content pages.
 
 ## Files
-- `manifest.json` — MV3 (`action` + `side_panel` + `scripting` + `activeTab` +
-  `storage` + `sidePanel` + `unlimitedStorage` (so replacement-image bytes fit
-  in `chrome.storage.local`), plus `host_permissions` for `http(s)` so the panel
-  can inject the engine and "Open & apply" can auto-inject into a new tab).
-- `background.js` — service worker; opens the side panel on toolbar click
-  (`setPanelBehavior`), and for "Open & apply" opens the target tab + injects.
-- `sidepanel.html` / `sidepanel.css` / `sidepanel.js` — the side-panel UI:
-  elegant toolbar + live change list (text diffs + image before→after
-  thumbnails), Share/Import, drag-and-drop, toasts.
-- `zip.js` — a tiny dependency-free ZIP reader/writer (store method) used by the
-  panel to build and read the `*.copyedit-bundle.zip` export.
-- `content.js` — the in-page engine: snapshot, two-mode editing, inline diff,
-  in-place image replacement with CSP-aware preview, export/import + location-aware
-  apply. No UI of its own beyond a floating mode toggle + the image hover button.
+WXT bundles `entrypoints/` into the extension; `manifest.json` is generated.
+- `wxt.config.ts` — declares `name`, `action`, `permissions` (`scripting` +
+  `activeTab` + `storage` + `sidePanel` + `unlimitedStorage` so replacement-image
+  bytes fit in `chrome.storage.local`) and `host_permissions` for `http(s)` so
+  the panel can inject the engine and "Open & apply" can auto-inject into a new
+  tab. WXT adds the `sidePanel` permission automatically and `side_panel` /
+  `background` / `icons` from the entrypoints + `public/`.
+- `entrypoints/background.ts` — service worker; opens the side panel on toolbar
+  click (`setPanelBehavior`) and tears the engine down when the panel closes.
+- `entrypoints/sidepanel/` (`index.html` / `style.css` / `main.ts`) — the
+  side-panel UI: elegant toolbar + live change list (text diffs + image
+  before→after thumbnails), Share/Import, drag-and-drop, toasts.
+- `entrypoints/engine.ts` — the in-page engine (built to `/engine.js`): snapshot,
+  three-mode editing, inline diff, in-place image replacement with CSP-aware
+  preview, export/import + location-aware apply. No UI of its own beyond a
+  floating mode toggle + the image hover button.
+- `utils/zip.ts` — a tiny dependency-free ZIP reader/writer (store method) used
+  by the panel to build and read the `*.copyedit-bundle.zip` export.
+- `utils/types.ts` — shared TypeScript types for the changeset/session/message
+  contracts.
+- `public/icon/` — toolbar/extension icons (auto-discovered by WXT).
 - `test/sample.html` — page with typos, React-style attributes, and images to try it on.

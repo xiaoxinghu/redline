@@ -1,11 +1,14 @@
-// content.js — the in-page engine. Injected by the side panel (sidepanel.js)
-// into the active tab. It owns everything that must touch the page DOM:
-// snapshotting pristine text, the three view modes, applying a saved session's
-// edits, and persisting this page's edits back to storage. Its only visible UI
-// is a small floating mode toggle pinned to the corner of the page — two
-// buttons that switch between the three modes (see "Floating control" below).
-// The cross-page change list lives in the side panel, which drives this engine
-// over messaging.
+// engine.ts — the in-page engine. Built by WXT into /engine.js and injected by
+// the side panel (entrypoints/sidepanel) into the active tab via
+// chrome.scripting.executeScript({ files: ["engine.js"] }). It owns everything
+// that must touch the page DOM: snapshotting pristine text, the three view
+// modes, applying a saved session's edits, and persisting this page's edits
+// back to storage. Its only visible UI is a small floating mode toggle pinned
+// to the corner of the page. The cross-page change list lives in the side
+// panel, which drives this engine over messaging.
+//
+// It is an *unlisted* script (not a manifest content_script): it is only ever
+// loaded on demand by the panel, never auto-injected on page load.
 //
 // SESSIONS (per origin, persisted in chrome.storage.local under copyedit_sessions)
 //   { "<origin>": { mode, pages: { "<pathname>": { title, url, updatedAt,
@@ -26,21 +29,19 @@
 //       getState | setMode | locate | remove | reset | teardown
 //   engine → panel   chrome.runtime.sendMessage({ type: "ce:update" | "ce:gone", ... })
 
-(function () {
-  "use strict";
-
+export default defineUnlistedScript(() => {
   // Already active in this tab → just re-report state and bail (no re-snapshot).
   if (window.__copyEditTool) {
     try { window.__copyEditTool.pushUpdate(); } catch {}
     return;
   }
 
-  const UI_ATTR = "data-ce-ui";
-  const ID_ATTR = "data-ce-id";
-  const IMG_ID_ATTR = "data-ce-img-id";
-  const SESSIONS_KEY = "copyedit_sessions";
+  const UI_ATTR = 'data-ce-ui';
+  const ID_ATTR = 'data-ce-id';
+  const IMG_ID_ATTR = 'data-ce-img-id';
+  const SESSIONS_KEY = 'copyedit_sessions';
   const SKIP_TAGS = new Set([
-    "SCRIPT", "STYLE", "NOSCRIPT", "TEXTAREA", "CODE", "PRE", "SVG", "CANVAS",
+    'SCRIPT', 'STYLE', 'NOSCRIPT', 'TEXTAREA', 'CODE', 'PRE', 'SVG', 'CANVAS',
   ]);
 
   const ORIGIN = location.origin;
@@ -50,8 +51,8 @@
   const currents = new Map();    // id -> edited text we want to show
   const spans = new Map();       // id -> wrapper <span>
   const descriptors = new Map(); // id -> element identity (computed pristine)
-  let orphans = [];              // saved changes that couldn't be applied here
-  let savedChanges = [];         // this page's saved edits, for re-applying to late content
+  let orphans: any[] = [];       // saved changes that couldn't be applied here
+  let savedChanges: any[] = [];  // this page's saved edits, for re-applying to late content
 
   // Image replacement registry (parallel to the text maps above). Images are
   // mutated in place rather than wrapped, so we track them by their own id.
@@ -61,19 +62,19 @@
   const imgDescriptors = new Map();// id -> element identity (computed pristine)
   const imgBlocked = new Set();    // ids whose preview the page's CSP refused
 
-  let mode = "edit";             // edit | preview | diff
-  let preDiffMode = "edit";       // mode to return to when the Diff switch is off
+  let mode = 'edit';             // edit | preview | diff
+  let preDiffMode = 'edit';      // mode to return to when the Diff switch is off
   let idCounter = 0;
 
   // ======================================================================
   // Element identity helpers (computed on the PRISTINE DOM, pre-wrapping)
   // ======================================================================
-  function cssPath(el) {
+  function cssPath(el: any) {
     const parts = [];
     let node = el;
-    while (node && node.nodeType === 1 && node.tagName !== "HTML") {
+    while (node && node.nodeType === 1 && node.tagName !== 'HTML') {
       if (node.id) {
-        parts.unshift("#" + CSS.escape(node.id));
+        parts.unshift('#' + CSS.escape(node.id));
         break;
       }
       let part = node.tagName.toLowerCase();
@@ -85,13 +86,13 @@
       parts.unshift(part);
       node = parent;
     }
-    return parts.join(" > ");
+    return parts.join(' > ');
   }
 
-  function domPath(el) {
+  function domPath(el: any) {
     const parts = [];
     let node = el;
-    while (node && node.nodeType === 1 && node.tagName !== "HTML") {
+    while (node && node.nodeType === 1 && node.tagName !== 'HTML') {
       let part = node.tagName.toLowerCase();
       const parent = node.parentElement;
       if (parent) {
@@ -101,21 +102,21 @@
       parts.unshift(part);
       node = parent;
     }
-    return parts.join(" > ");
+    return parts.join(' > ');
   }
 
-  function collectAttrs(el) {
-    const keep = ["role", "name", "type", "href", "src", "srcset", "alt", "title", "placeholder", "for"];
-    const out = {};
+  function collectAttrs(el: any) {
+    const keep = ['role', 'name', 'type', 'href', 'src', 'srcset', 'alt', 'title', 'placeholder', 'for'];
+    const out: Record<string, string> = {};
     for (const k of keep) if (el.hasAttribute(k)) out[k] = el.getAttribute(k);
     for (const a of el.attributes) {
-      if (a.name.startsWith("aria-") || a.name.startsWith("data-")) out[a.name] = a.value;
+      if (a.name.startsWith('aria-') || a.name.startsWith('data-')) out[a.name] = a.value;
     }
     return out;
   }
 
   /** Best-effort React component name from data-* or CSS-module class names. */
-  function componentHint(el) {
+  function componentHint(el: any) {
     let node = el;
     for (let i = 0; node && node.nodeType === 1 && i < 4; i++, node = node.parentElement) {
       if (node.dataset && node.dataset.component) return node.dataset.component;
@@ -131,24 +132,24 @@
     return null;
   }
 
-  let allHeadings = [];
-  function nearestHeading(el) {
+  let allHeadings: any[] = [];
+  function nearestHeading(el: any) {
     let best = null;
     for (const h of allHeadings) {
       if (h.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING) best = h;
       else break;
     }
-    return best ? best.textContent.trim().replace(/\s+/g, " ") : null;
+    return best ? best.textContent.trim().replace(/\s+/g, ' ') : null;
   }
 
-  function nearestLandmark(el) {
-    const lm = el.closest("nav, main, header, footer, aside, section, form, article, [role]");
+  function nearestLandmark(el: any) {
+    const lm = el.closest('nav, main, header, footer, aside, section, form, article, [role]');
     if (!lm) return null;
-    return lm.getAttribute("aria-label") || lm.getAttribute("role") || lm.tagName.toLowerCase();
+    return lm.getAttribute('aria-label') || lm.getAttribute('role') || lm.tagName.toLowerCase();
   }
 
   /** Index of textNode among its parent's qualifying (non-whitespace) child text nodes. */
-  function qualifyingTextIndex(textNode) {
+  function qualifyingTextIndex(textNode: any) {
     let idx = 0;
     for (const child of textNode.parentNode.childNodes) {
       if (child === textNode) return idx;
@@ -157,7 +158,7 @@
     return idx;
   }
 
-  function describe(textNode) {
+  function describe(textNode: any) {
     const el = textNode.parentElement;
     return {
       tag: el.tagName.toLowerCase(),
@@ -167,14 +168,14 @@
       attributes: collectAttrs(el),
       selector: cssPath(el),
       domPath: domPath(el),
-      elementText: (el.textContent || "").trim().replace(/\s+/g, " "),
+      elementText: (el.textContent || '').trim().replace(/\s+/g, ' '),
       textIndex: qualifyingTextIndex(textNode),
       context: { nearestHeading: nearestHeading(el), landmark: nearestLandmark(el) },
     };
   }
 
   /** Identity descriptor for a whole element (used for images, which aren't wrapped). */
-  function describeElement(el) {
+  function describeElement(el: any) {
     return {
       tag: el.tagName.toLowerCase(),
       id: el.id || null,
@@ -183,7 +184,7 @@
       attributes: collectAttrs(el),
       selector: cssPath(el),
       domPath: domPath(el),
-      elementText: (el.textContent || "").trim().replace(/\s+/g, " ").slice(0, 200),
+      elementText: (el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 200),
       context: { nearestHeading: nearestHeading(el), landmark: nearestLandmark(el) },
     };
   }
@@ -196,7 +197,7 @@
   // on a same-document navigation, without disturbing existing wrappers.
   // ======================================================================
   function snapshot() {
-    allHeadings = [...document.querySelectorAll("h1,h2,h3,h4,h5,h6")];
+    allHeadings = [...document.querySelectorAll('h1,h2,h3,h4,h5,h6')];
     snapshotImages();
 
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
@@ -205,22 +206,22 @@
         const parent = node.parentElement;
         if (!parent || SKIP_TAGS.has(parent.tagName)) return NodeFilter.FILTER_REJECT;
         if (parent.closest(`[${UI_ATTR}]`)) return NodeFilter.FILTER_REJECT;
-        if (parent.closest(".ce-track")) return NodeFilter.FILTER_REJECT; // already tracked
+        if (parent.closest('.ce-track')) return NodeFilter.FILTER_REJECT; // already tracked
         return NodeFilter.FILTER_ACCEPT;
       },
     });
 
-    const textNodes = [];
+    const textNodes: any[] = [];
     while (walker.nextNode()) textNodes.push(walker.currentNode);
 
     // Describe everything BEFORE mutating the DOM, so paths/indices are pristine.
-    const described = textNodes.map((tn) => [tn, describe(tn)]);
+    const described = textNodes.map((tn) => [tn, describe(tn)] as const);
 
     for (const [tn, desc] of described) {
-      const id = "ce-" + idCounter++;
-      const span = document.createElement("span");
+      const id = 'ce-' + idCounter++;
+      const span = document.createElement('span');
       span.setAttribute(ID_ATTR, id);
-      span.className = "ce-track";
+      span.className = 'ce-track';
       span.textContent = tn.nodeValue;
       originals.set(id, tn.nodeValue);
       currents.set(id, tn.nodeValue);
@@ -233,16 +234,16 @@
   // ======================================================================
   // 2. Diff  (dependency-free word/whitespace token LCS)
   // ======================================================================
-  function tokenize(s) {
+  function tokenize(s: string) {
     return s.match(/(\s+|[^\s]+)/g) || [];
   }
 
-  function diffTokens(a, b) {
+  function diffTokens(a: string[], b: string[]) {
     const n = a.length, m = b.length;
     if (n * m > 4_000_000) {
       const out = [];
-      if (n) out.push({ op: "-", text: a.join("") });
-      if (m) out.push({ op: "+", text: b.join("") });
+      if (n) out.push({ op: '-', text: a.join('') });
+      if (m) out.push({ op: '+', text: b.join('') });
       return out;
     }
     const dp = Array.from({ length: n + 1 }, () => new Int32Array(m + 1));
@@ -253,14 +254,14 @@
     const raw = [];
     let i = 0, j = 0;
     while (i < n && j < m) {
-      if (a[i] === b[j]) { raw.push({ op: "=", text: a[i] }); i++; j++; }
-      else if (dp[i + 1][j] >= dp[i][j + 1]) { raw.push({ op: "-", text: a[i] }); i++; }
-      else { raw.push({ op: "+", text: b[j] }); j++; }
+      if (a[i] === b[j]) { raw.push({ op: '=', text: a[i] }); i++; j++; }
+      else if (dp[i + 1][j] >= dp[i][j + 1]) { raw.push({ op: '-', text: a[i] }); i++; }
+      else { raw.push({ op: '+', text: b[j] }); j++; }
     }
-    while (i < n) raw.push({ op: "-", text: a[i++] });
-    while (j < m) raw.push({ op: "+", text: b[j++] });
+    while (i < n) raw.push({ op: '-', text: a[i++] });
+    while (j < m) raw.push({ op: '+', text: b[j++] });
 
-    const merged = [];
+    const merged: { op: string; text: string }[] = [];
     for (const p of raw) {
       const last = merged[merged.length - 1];
       if (last && last.op === p.op) last.text += p.text;
@@ -269,13 +270,13 @@
     return merged;
   }
 
-  function diffFragment(original, current) {
+  function diffFragment(original: string, current: string) {
     const frag = document.createDocumentFragment();
     for (const p of diffTokens(tokenize(original), tokenize(current))) {
-      if (p.op === "=") frag.appendChild(document.createTextNode(p.text));
+      if (p.op === '=') frag.appendChild(document.createTextNode(p.text));
       else {
-        const el = document.createElement(p.op === "+" ? "ins" : "del");
-        el.className = p.op === "+" ? "ce-ins" : "ce-del";
+        const el = document.createElement(p.op === '+' ? 'ins' : 'del');
+        el.className = p.op === '+' ? 'ce-ins' : 'ce-del';
         el.textContent = p.text;
         frag.appendChild(el);
       }
@@ -286,11 +287,11 @@
   // ======================================================================
   // 3. Storage (per-origin sessions)
   // ======================================================================
-  function storageGet(key) {
+  function storageGet(key: string): Promise<any> {
     return new Promise((res) => { try { chrome.storage.local.get(key, (r) => res(r || {})); } catch { res({}); } });
   }
-  function storageSet(obj) {
-    return new Promise((res) => { try { chrome.storage.local.set(obj, res); } catch { res(); } });
+  function storageSet(obj: any): Promise<void> {
+    return new Promise((res) => { try { chrome.storage.local.set(obj, () => res()); } catch { res(); } });
   }
   async function getSessions() {
     const r = await storageGet(SESSIONS_KEY);
@@ -305,7 +306,7 @@
     // which would otherwise file these edits under the wrong page.
     const path = PATH;
     const title = document.title;
-    const url = location.href.split("#")[0];
+    const url = location.href.split('#')[0];
     const changes = buildPageChanges();
     const sessions = await getSessions();
     const session = sessions[ORIGIN] || { mode, pages: {} };
@@ -322,12 +323,12 @@
   // ======================================================================
   // 4. Apply a saved session to this page
   // ======================================================================
-  function safeQueryAll(sel) {
+  function safeQueryAll(sel: string) {
     if (!sel) return [];
     try { return [...document.querySelectorAll(sel)]; } catch { return []; }
   }
 
-  function resolveElement(el) {
+  function resolveElement(el: any) {
     let m = safeQueryAll(el.selector);
     if (m.length === 1) return m[0];
     const byPath = safeQueryAll(el.domPath);
@@ -336,15 +337,15 @@
     return null;
   }
 
-  function findSpanForChange(change) {
+  function findSpanForChange(change: any) {
     const el = change.element || {};
     const target = resolveElement(el);
     const ti = el.textIndex ?? 0;
     if (target) {
-      const direct = [...target.children].filter((c) => c.matches?.("span.ce-track"));
+      const direct = [...target.children].filter((c: any) => c.matches?.('span.ce-track'));
       const hit = direct[ti];
       if (hit && originals.get(hit.getAttribute(ID_ATTR)) === change.original) return hit;
-      for (const s of target.querySelectorAll("span.ce-track")) {
+      for (const s of target.querySelectorAll('span.ce-track')) {
         if (originals.get(s.getAttribute(ID_ATTR)) === change.original) return s;
       }
     }
@@ -359,10 +360,10 @@
   // Seed `currents` from saved changes. Anything we can't place (element gone or
   // its text no longer matches the saved original) becomes an "orphan" — kept in
   // storage and surfaced in the panel as a warning, but not applied to the page.
-  function applySaved(changes) {
+  function applySaved(changes: any[]) {
     orphans = [];
     for (const change of changes || []) {
-      if (change.kind === "image") { applyOneImage(change); continue; }
+      if (change.kind === 'image') { applyOneImage(change); continue; }
       const span = findSpanForChange(change);
       if (span && originals.get(span.getAttribute(ID_ATTR)) === change.original) {
         currents.set(span.getAttribute(ID_ATTR), change.edited);
@@ -385,13 +386,13 @@
   //   none   -> keep the original image, show a badge       (both blocked)
   // ======================================================================
   const PROBE_PNG =
-    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
+    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC';
 
-  function probeImg(src) {
+  function probeImg(src: string): Promise<boolean> {
     return new Promise((resolve) => {
       const im = new Image();
       let done = false;
-      const fin = (v) => { if (!done) { done = true; resolve(v); } };
+      const fin = (v: boolean) => { if (!done) { done = true; resolve(v); } };
       im.onload = () => fin(im.naturalWidth > 0);
       im.onerror = () => fin(false);
       setTimeout(() => fin(false), 1500);
@@ -399,73 +400,73 @@
     });
   }
 
-  let _imgScheme; // undefined until probed; then "data" | "blob" | "none"
+  let _imgScheme: string | undefined; // undefined until probed; then "data" | "blob" | "none"
   async function getImgScheme() {
     if (_imgScheme !== undefined) return _imgScheme;
-    if (await probeImg(PROBE_PNG)) return (_imgScheme = "data");
+    if (await probeImg(PROBE_PNG)) return (_imgScheme = 'data');
     let url = null;
     try {
-      url = URL.createObjectURL(dataUrlToBlob(PROBE_PNG, "image/png"));
-      _imgScheme = (await probeImg(url)) ? "blob" : "none";
-    } catch { _imgScheme = "none"; }
+      url = URL.createObjectURL(dataUrlToBlob(PROBE_PNG, 'image/png'));
+      _imgScheme = (await probeImg(url)) ? 'blob' : 'none';
+    } catch { _imgScheme = 'none'; }
     finally { if (url) URL.revokeObjectURL(url); }
     return _imgScheme;
   }
 
-  function dataUrlToBlob(dataUrl, type) {
-    const comma = dataUrl.indexOf(",");
+  function dataUrlToBlob(dataUrl: string, type?: string) {
+    const comma = dataUrl.indexOf(',');
     const meta = dataUrl.slice(0, comma);
     const bin = atob(dataUrl.slice(comma + 1));
     const arr = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-    const mime = type || (meta.match(/data:([^;]+)/) || [])[1] || "image/png";
+    const mime = type || (meta.match(/data:([^;]+)/) || [])[1] || 'image/png';
     return new Blob([arr], { type: mime });
   }
 
   const blobUrls = new Map(); // id -> object URL (revoke on change/teardown)
-  function ensureBlobUrl(id, cur) {
+  function ensureBlobUrl(id: string, cur: any) {
     revokeBlob(id);
     const u = URL.createObjectURL(dataUrlToBlob(cur.dataUrl, cur.fileType));
     blobUrls.set(id, u);
     return u;
   }
-  function revokeBlob(id) {
+  function revokeBlob(id: string) {
     const u = blobUrls.get(id);
     if (u) { URL.revokeObjectURL(u); blobUrls.delete(id); }
   }
 
   // Tag every untracked <img> (idempotent — safe to re-run for late content).
   function snapshotImages() {
-    for (const img of document.querySelectorAll("img")) {
+    for (const img of document.querySelectorAll('img')) {
       if (img.closest(`[${UI_ATTR}]`)) continue;
       if (img.hasAttribute(IMG_ID_ATTR)) continue;
-      const id = "ceimg-" + idCounter++;
+      const id = 'ceimg-' + idCounter++;
       img.setAttribute(IMG_ID_ATTR, id);
       imgEls.set(id, img);
       imgOriginals.set(id, {
-        src: img.currentSrc || img.getAttribute("src") || img.src || "",
-        srcset: img.getAttribute("srcset"),
-        sizes: img.getAttribute("sizes"),
-        alt: img.getAttribute("alt"),
+        src: img.currentSrc || img.getAttribute('src') || img.src || '',
+        srcset: img.getAttribute('srcset'),
+        sizes: img.getAttribute('sizes'),
+        alt: img.getAttribute('alt'),
       });
       imgDescriptors.set(id, describeElement(img));
     }
   }
 
-  function restoreImgAttrs(id) {
+  function restoreImgAttrs(id: string) {
     const img = imgEls.get(id), o = imgOriginals.get(id);
     revokeBlob(id);
     removeBadge(id);
     if (!img || !o) return;
     img.onerror = null;
-    if (o.srcset) img.setAttribute("srcset", o.srcset); else img.removeAttribute("srcset");
-    if (o.sizes) img.setAttribute("sizes", o.sizes); else img.removeAttribute("sizes");
+    if (o.srcset) img.setAttribute('srcset', o.srcset); else img.removeAttribute('srcset');
+    if (o.sizes) img.setAttribute('sizes', o.sizes); else img.removeAttribute('sizes');
     if (o.src != null) img.src = o.src;
-    img.classList.remove("ce-img-changed");
+    img.classList.remove('ce-img-changed');
   }
 
   // Both schemes refused: keep the original image visible, flag it with a badge.
-  function applyBlocked(id) {
+  function applyBlocked(id: string) {
     const img = imgEls.get(id), o = imgOriginals.get(id);
     revokeBlob(id);
     if (img && o) { img.onerror = null; if (o.src != null) img.src = o.src; }
@@ -473,39 +474,39 @@
     showBadge(id);
   }
 
-  async function setImgPreview(id) {
+  async function setImgPreview(id: string) {
     const img = imgEls.get(id);
     const cur = imgCurrents.get(id);
     if (!img) return;
     if (!cur) { restoreImgAttrs(id); imgBlocked.delete(id); return; }
     const scheme = await getImgScheme();
     if (!imgEls.has(id) || imgCurrents.get(id) !== cur) return; // changed mid-await
-    img.removeAttribute("srcset");
-    img.removeAttribute("sizes");
-    if (scheme === "none") { applyBlocked(id); return; }
+    img.removeAttribute('srcset');
+    img.removeAttribute('sizes');
+    if (scheme === 'none') { applyBlocked(id); return; }
     imgBlocked.delete(id);
     removeBadge(id);
     img.onerror = () => { img.onerror = null; applyBlocked(id); pushUpdate(); };
-    img.src = scheme === "blob" ? ensureBlobUrl(id, cur) : cur.dataUrl;
+    img.src = scheme === 'blob' ? ensureBlobUrl(id, cur) : cur.dataUrl;
   }
 
   function renderImages() {
     for (const id of imgCurrents.keys()) setImgPreview(id);
   }
 
-  function setImgOutline(on) {
+  function setImgOutline(on: boolean) {
     for (const [id, img] of imgEls) {
-      img.classList.toggle("ce-img-changed", !!(on && imgCurrents.get(id)));
+      img.classList.toggle('ce-img-changed', !!(on && imgCurrents.get(id)));
     }
   }
 
-  function replaceImageFromFile(id, file) {
+  function replaceImageFromFile(id: string, file: File) {
     if (!file || !/^image\//.test(file.type)) return;
     const reader = new FileReader();
     reader.onload = async () => {
       imgCurrents.set(id, { dataUrl: String(reader.result), fileName: file.name, fileType: file.type });
       await setImgPreview(id);
-      setImgOutline(mode === "diff");
+      setImgOutline(mode === 'diff');
       await persist();
       pushUpdate();
     };
@@ -519,9 +520,9 @@
       if (!cur) continue;
       const o = imgOriginals.get(id) || {};
       out.push({
-        kind: "image",
+        kind: 'image',
         element: imgDescriptors.get(id),
-        original: o.src || "",
+        original: o.src || '',
         edited: cur.dataUrl,
         alt: o.alt || null,
         fileName: cur.fileName || null,
@@ -531,15 +532,15 @@
     return out;
   }
 
-  function applyOneImage(change) {
+  function applyOneImage(change: any) {
     const target = resolveElement(change.element || {});
-    if (target && target.tagName === "IMG" && target.hasAttribute(IMG_ID_ATTR)) {
+    if (target && target.tagName === 'IMG' && target.hasAttribute(IMG_ID_ATTR)) {
       imgCurrents.set(target.getAttribute(IMG_ID_ATTR), {
         dataUrl: change.edited, fileName: change.fileName, fileType: change.fileType,
       });
     } else {
       orphans.push({
-        kind: "image", element: change.element || {},
+        kind: 'image', element: change.element || {},
         original: change.original, edited: change.edited,
         fileName: change.fileName, fileType: change.fileType,
       });
@@ -548,52 +549,52 @@
 
   // --- Blocked-preview badge + hover "Replace image" button ----------------
   const badges = new Map(); // id -> badge element
-  function showBadge(id) {
+  function showBadge(id: string) {
     if (badges.has(id)) return;
-    const b = document.createElement("div");
-    b.setAttribute(UI_ATTR, "");
-    b.setAttribute("contenteditable", "false");
-    b.className = "ce-img-badge";
-    b.textContent = "\u26A0 Preview blocked by this site";
+    const b = document.createElement('div');
+    b.setAttribute(UI_ATTR, '');
+    b.setAttribute('contenteditable', 'false');
+    b.className = 'ce-img-badge';
+    b.textContent = '\u26A0 Preview blocked by this site';
     b.title = "This site's security policy (CSP img-src) blocks images we add, so the " +
       "replacement can't display here. It's still saved and included when you export.";
     document.body.appendChild(b);
     badges.set(id, b);
     positionBadge(id);
   }
-  function removeBadge(id) { const b = badges.get(id); if (b) { b.remove(); badges.delete(id); } }
+  function removeBadge(id: string) { const b = badges.get(id); if (b) { b.remove(); badges.delete(id); } }
   function removeAllBadges() { for (const b of badges.values()) b.remove(); badges.clear(); }
-  function positionBadge(id) {
+  function positionBadge(id: string) {
     const b = badges.get(id), img = imgEls.get(id);
     if (!b || !img) return;
     const r = img.getBoundingClientRect();
-    b.style.left = Math.max(6, r.left + 6) + "px";
-    b.style.top = Math.max(6, r.top + 6) + "px";
+    b.style.left = Math.max(6, r.left + 6) + 'px';
+    b.style.top = Math.max(6, r.top + 6) + 'px';
   }
 
-  let imgBtn = null, imgInput = null, imgBtnId = null, pendingImgId = null;
+  let imgBtn: any = null, imgInput: any = null, imgBtnId: string | null = null, pendingImgId: string | null = null;
   function injectImgUI() {
-    imgInput = document.createElement("input");
-    imgInput.type = "file";
-    imgInput.accept = "image/*";
-    imgInput.setAttribute(UI_ATTR, "");
-    imgInput.style.display = "none";
-    imgInput.addEventListener("change", () => {
+    imgInput = document.createElement('input');
+    imgInput.type = 'file';
+    imgInput.accept = 'image/*';
+    imgInput.setAttribute(UI_ATTR, '');
+    imgInput.style.display = 'none';
+    imgInput.addEventListener('change', () => {
       const f = imgInput.files && imgInput.files[0];
       const id = pendingImgId;   // captured at click time — hover/hide can't clear it
       pendingImgId = null;
-      imgInput.value = "";
+      imgInput.value = '';
       if (f && id) replaceImageFromFile(id, f);
     });
 
-    imgBtn = document.createElement("button");
-    imgBtn.type = "button";
-    imgBtn.id = "ce-img-btn";
-    imgBtn.setAttribute(UI_ATTR, "");
-    imgBtn.setAttribute("contenteditable", "false");
-    imgBtn.textContent = "\u2B06 Replace image";
-    imgBtn.style.display = "none";
-    imgBtn.addEventListener("click", (e) => {
+    imgBtn = document.createElement('button');
+    imgBtn.type = 'button';
+    imgBtn.id = 'ce-img-btn';
+    imgBtn.setAttribute(UI_ATTR, '');
+    imgBtn.setAttribute('contenteditable', 'false');
+    imgBtn.textContent = '\u2B06 Replace image';
+    imgBtn.style.display = 'none';
+    imgBtn.addEventListener('click', (e: any) => {
       e.preventDefault(); e.stopPropagation();
       if (!imgBtnId) return;
       pendingImgId = imgBtnId;   // remember the target before the dialog steals hover
@@ -608,30 +609,30 @@
     if (!img) return hideImgBtn();
     const r = img.getBoundingClientRect();
     if (r.width < 1 || r.bottom < 0 || r.top > innerHeight) return hideImgBtn();
-    imgBtn.style.left = Math.max(6, r.right - imgBtn.offsetWidth - 8) + "px";
-    imgBtn.style.top = Math.max(6, r.top + 8) + "px";
+    imgBtn.style.left = Math.max(6, r.right - imgBtn.offsetWidth - 8) + 'px';
+    imgBtn.style.top = Math.max(6, r.top + 8) + 'px';
   }
-  function showImgBtn(img) {
+  function showImgBtn(img: any) {
     imgBtnId = img.getAttribute(IMG_ID_ATTR);
-    imgBtn.style.display = "inline-flex";
+    imgBtn.style.display = 'inline-flex';
     positionImgBtn();
   }
-  function hideImgBtn() { if (imgBtn) imgBtn.style.display = "none"; imgBtnId = null; }
+  function hideImgBtn() { if (imgBtn) imgBtn.style.display = 'none'; imgBtnId = null; }
 
-  function onImgHover(e) {
-    if (mode !== "edit") return;
+  function onImgHover(e: any) {
+    if (mode !== 'edit') return;
     const t = e.target;
-    if (t && t.tagName === "IMG" && t.hasAttribute(IMG_ID_ATTR)) showImgBtn(t);
+    if (t && t.tagName === 'IMG' && t.hasAttribute(IMG_ID_ATTR)) showImgBtn(t);
   }
-  function onImgOut(e) {
-    if (mode !== "edit") return;
+  function onImgOut(e: any) {
+    if (mode !== 'edit') return;
     const to = e.relatedTarget;
     if (to === imgBtn) return;
-    if (to && to.tagName === "IMG" && to.hasAttribute(IMG_ID_ATTR)) return;
+    if (to && to.tagName === 'IMG' && to.hasAttribute(IMG_ID_ATTR)) return;
     hideImgBtn();
   }
   function positionOverlays() {
-    if (imgBtn && imgBtn.style.display !== "none") positionImgBtn();
+    if (imgBtn && imgBtn.style.display !== 'none') positionImgBtn();
     for (const id of badges.keys()) positionBadge(id);
   }
 
@@ -639,17 +640,17 @@
   // 5. Modes
   // ======================================================================
   const INTERCEPT_TYPES =
-    ["pointerdown", "mousedown", "pointerup", "mouseup", "click", "auxclick", "dblclick", "submit"];
+    ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click', 'auxclick', 'dblclick', 'submit'];
   let intercepting = false;
-  let interceptHandler = null;
-  function setInterception(on) {
+  let interceptHandler: any = null;
+  function setInterception(on: boolean) {
     if (on === intercepting) return;
     if (on) {
-      interceptHandler = (e) => {
+      interceptHandler = (e: any) => {
         const t = e.target;
         if (t && t.closest && t.closest(`[${UI_ATTR}]`)) return;
         e.stopImmediatePropagation();
-        if (e.type === "click" || e.type === "auxclick" || e.type === "submit") e.preventDefault();
+        if (e.type === 'click' || e.type === 'auxclick' || e.type === 'submit') e.preventDefault();
       };
       for (const ty of INTERCEPT_TYPES) window.addEventListener(ty, interceptHandler, true);
     } else if (interceptHandler) {
@@ -660,7 +661,7 @@
   }
 
   function renderPlain() {
-    document.documentElement.classList.remove("ce-review-mode");
+    document.documentElement.classList.remove('ce-review-mode');
     for (const [id, span] of spans) {
       const t = currents.get(id);
       if (span.textContent !== t) span.textContent = t;
@@ -671,17 +672,17 @@
     for (const [id, span] of spans) {
       const cur = currents.get(id);
       const orig = originals.get(id);
-      span.textContent = "";
+      span.textContent = '';
       if (cur === orig) span.textContent = cur;
       else span.appendChild(diffFragment(orig, cur));
     }
-    document.documentElement.classList.add("ce-review-mode");
+    document.documentElement.classList.add('ce-review-mode');
   }
 
   // Re-render the page in whatever mode we're currently in (used after we wrap
   // newly-rendered content so it shows up immediately).
   function renderCurrentMode() {
-    if (mode === "diff") renderDiff();
+    if (mode === 'diff') renderDiff();
     else renderPlain(); // edit + preview both show plain current text
   }
 
@@ -698,50 +699,50 @@
     snapshot();
     applySaved(savedChanges);
     const root = document.documentElement.classList;
-    root.remove("ce-review-mode");
-    root.add("ce-edit-mode");
+    root.remove('ce-review-mode');
+    root.add('ce-edit-mode');
     for (const [id, span] of spans) {
       if (span.textContent !== currents.get(id)) span.textContent = currents.get(id);
     }
-    document.designMode = "on";
+    document.designMode = 'on';
     setInterception(true);
     renderImages();
     setImgOutline(false);
-    mode = "edit";
+    mode = 'edit';
   }
 
   function enterPreview() {
-    if (mode === "edit") captureEdits();
-    document.documentElement.classList.remove("ce-edit-mode");
-    document.designMode = "off";
+    if (mode === 'edit') captureEdits();
+    document.documentElement.classList.remove('ce-edit-mode');
+    document.designMode = 'off';
     setInterception(false);
     renderPlain();
     renderImages();
     setImgOutline(false);
     hideImgBtn();
-    mode = "preview";
+    mode = 'preview';
   }
 
   function enterDiff() {
-    if (mode !== "diff") preDiffMode = mode;
-    if (mode === "edit") captureEdits();
-    document.documentElement.classList.remove("ce-edit-mode");
-    document.designMode = "off";
+    if (mode !== 'diff') preDiffMode = mode;
+    if (mode === 'edit') captureEdits();
+    document.documentElement.classList.remove('ce-edit-mode');
+    document.designMode = 'off';
     setInterception(true);
     renderDiff();
     renderImages();
     setImgOutline(true);
     hideImgBtn();
-    mode = "diff";
+    mode = 'diff';
   }
 
-  function enterMode(next) {
-    if (next === "preview") enterPreview();
-    else if (next === "diff") enterDiff();
+  function enterMode(next: string) {
+    if (next === 'preview') enterPreview();
+    else if (next === 'diff') enterDiff();
     else enterEdit();
   }
 
-  async function setMode(next) {
+  async function setMode(next: string) {
     if (next === mode) return;
     enterMode(next);
     await persist();
@@ -751,8 +752,8 @@
   // ======================================================================
   // 6. Current text / changes
   // ======================================================================
-  function currentText(id) {
-    if (mode === "edit") {
+  function currentText(id: string) {
+    if (mode === 'edit') {
       const span = spans.get(id);
       return span ? span.textContent : originals.get(id);
     }
@@ -774,22 +775,22 @@
       original: originals.get(id),
       edited: currentText(id),
     }));
-    return applied.concat(buildImageChanges(), orphans);
+    return applied.concat(buildImageChanges() as any, orphans);
   }
 
   // For the panel: current-page rows with live status + ids for Locate.
   function buildRows() {
     const rows = changedIds().map((id) => ({
       id,
-      status: "applied",
+      status: 'applied',
       original: originals.get(id),
       edited: currentText(id),
       element: descriptors.get(id),
     }));
     const warn = orphans.map((c) => ({
       id: null,
-      status: "warning",
-      kind: c.kind === "image" ? "image" : "text",
+      status: 'warning',
+      kind: c.kind === 'image' ? 'image' : 'text',
       original: c.original,
       edited: c.edited,
       element: c.element || {},
@@ -799,21 +800,21 @@
       if (!cur) continue;
       imgRows.push({
         id,
-        status: "applied",
-        kind: "image",
+        status: 'applied',
+        kind: 'image',
         previewBlocked: imgBlocked.has(id),
-        original: (imgOriginals.get(id) || {}).src || "",
+        original: (imgOriginals.get(id) || {}).src || '',
         edited: cur.dataUrl,
         element: imgDescriptors.get(id),
       });
     }
-    return rows.concat(imgRows, warn);
+    return rows.concat(imgRows as any, warn as any);
   }
 
   // ======================================================================
   // 7. Panel bridge
   // ======================================================================
-  function send(msg) {
+  function send(msg: any) {
     try { chrome.runtime.sendMessage(msg, () => void chrome.runtime.lastError); } catch {}
   }
 
@@ -823,62 +824,62 @@
   // iOS-style switch sits beside it whenever this page has edits: flip it ON to
   // overlay the inline diff, OFF to return to whichever mode you came from. It
   // carries UI_ATTR so the snapshot/interception ignore it.
-  let floatEl = null, floatPrimary = null, floatDiff = null, floatSep = null, floatFrame = null, floatFrameText = null;
+  let floatEl: any = null, floatPrimary: any = null, floatDiff: any = null, floatSep: any = null, floatFrame: any = null, floatFrameText: any = null;
 
   function injectFloat() {
-    const wrap = document.createElement("div");
-    wrap.setAttribute(UI_ATTR, "");
-    wrap.id = "ce-float";
-    wrap.setAttribute("contenteditable", "false");
+    const wrap = document.createElement('div');
+    wrap.setAttribute(UI_ATTR, '');
+    wrap.id = 'ce-float';
+    wrap.setAttribute('contenteditable', 'false');
 
-    floatDiff = document.createElement("button");
-    floatDiff.setAttribute(UI_ATTR, "");
-    floatDiff.type = "button";
-    floatDiff.className = "ce-toggle";
-    floatDiff.setAttribute("role", "switch");
-    floatDiff.title = "Toggle an inline diff overlay of every change";
-    const tLabel = document.createElement("span");
-    tLabel.className = "ce-toggle-label";
-    tLabel.textContent = "Diff";
-    const track = document.createElement("span");
-    track.className = "ce-toggle-track";
-    const knob = document.createElement("span");
-    knob.className = "ce-toggle-knob";
+    floatDiff = document.createElement('button');
+    floatDiff.setAttribute(UI_ATTR, '');
+    floatDiff.type = 'button';
+    floatDiff.className = 'ce-toggle';
+    floatDiff.setAttribute('role', 'switch');
+    floatDiff.title = 'Toggle an inline diff overlay of every change';
+    const tLabel = document.createElement('span');
+    tLabel.className = 'ce-toggle-label';
+    tLabel.textContent = 'Diff';
+    const track = document.createElement('span');
+    track.className = 'ce-toggle-track';
+    const knob = document.createElement('span');
+    knob.className = 'ce-toggle-knob';
     track.appendChild(knob);
     floatDiff.append(tLabel, track);
-    floatDiff.addEventListener("click", (e) => {
+    floatDiff.addEventListener('click', (e: any) => {
       e.preventDefault(); e.stopPropagation();
-      setMode(mode === "diff" ? preDiffMode : "diff");
+      setMode(mode === 'diff' ? preDiffMode : 'diff');
     });
 
-    floatPrimary = document.createElement("button");
-    floatPrimary.setAttribute(UI_ATTR, "");
-    floatPrimary.type = "button";
-    floatPrimary.className = "ce-fab ce-fab-primary";
-    floatPrimary.addEventListener("click", (e) => {
+    floatPrimary = document.createElement('button');
+    floatPrimary.setAttribute(UI_ATTR, '');
+    floatPrimary.type = 'button';
+    floatPrimary.className = 'ce-fab ce-fab-primary';
+    floatPrimary.addEventListener('click', (e: any) => {
       e.preventDefault(); e.stopPropagation();
-      setMode(floatPrimary.dataset.target || "edit");
+      setMode(floatPrimary.dataset.target || 'edit');
     });
 
-    floatSep = document.createElement("span");
-    floatSep.setAttribute(UI_ATTR, "");
-    floatSep.className = "ce-sep";
+    floatSep = document.createElement('span');
+    floatSep.setAttribute(UI_ATTR, '');
+    floatSep.className = 'ce-sep';
 
     wrap.append(floatPrimary, floatSep, floatDiff);
 
     // Whole-page "you're in a special mode" cue: a fixed, click-through frame
     // that glows around the viewport, plus a status pill at the top edge. Color
     // is driven by the ce-edit-mode / ce-review-mode classes on <html>.
-    floatFrame = document.createElement("div");
-    floatFrame.setAttribute(UI_ATTR, "");
-    floatFrame.id = "ce-frame";
-    const label = document.createElement("span");
-    label.setAttribute(UI_ATTR, "");
-    label.className = "ce-frame-label";
-    const dot = document.createElement("span");
-    dot.className = "ce-frame-dot";
-    floatFrameText = document.createElement("span");
-    floatFrameText.className = "ce-frame-text";
+    floatFrame = document.createElement('div');
+    floatFrame.setAttribute(UI_ATTR, '');
+    floatFrame.id = 'ce-frame';
+    const label = document.createElement('span');
+    label.setAttribute(UI_ATTR, '');
+    label.className = 'ce-frame-label';
+    const dot = document.createElement('span');
+    dot.className = 'ce-frame-dot';
+    floatFrameText = document.createElement('span');
+    floatFrameText.className = 'ce-frame-text';
     label.append(dot, floatFrameText);
     floatFrame.appendChild(label);
 
@@ -888,32 +889,32 @@
 
   function renderFloat() {
     if (!floatPrimary) return;
-    if (mode === "edit") {
-      floatPrimary.textContent = "Done";
-      floatPrimary.dataset.target = "preview";
-      floatPrimary.title = "Done editing — preview the page with your changes applied";
+    if (mode === 'edit') {
+      floatPrimary.textContent = 'Done';
+      floatPrimary.dataset.target = 'preview';
+      floatPrimary.title = 'Done editing — preview the page with your changes applied';
     } else {
-      floatPrimary.textContent = "Edit";
-      floatPrimary.dataset.target = "edit";
-      floatPrimary.title = "Edit the page text in place";
+      floatPrimary.textContent = 'Edit';
+      floatPrimary.dataset.target = 'edit';
+      floatPrimary.title = 'Edit the page text in place';
     }
     // "Diff" switch: visible whenever there's something to diff (or we're in
     // diff mode), ON only while in diff mode.
-    const showDiff = mode === "diff" || changedIds().length > 0;
-    floatDiff.style.display = showDiff ? "" : "none";
-    if (floatSep) floatSep.style.display = showDiff ? "" : "none";
-    floatDiff.classList.toggle("is-on", mode === "diff");
-    floatDiff.setAttribute("aria-checked", String(mode === "diff"));
+    const showDiff = mode === 'diff' || changedIds().length > 0;
+    floatDiff.style.display = showDiff ? '' : 'none';
+    if (floatSep) floatSep.style.display = showDiff ? '' : 'none';
+    floatDiff.classList.toggle('is-on', mode === 'diff');
+    floatDiff.setAttribute('aria-checked', String(mode === 'diff'));
     if (floatFrameText) {
       floatFrameText.textContent =
-        mode === "edit" ? "Editing" : mode === "diff" ? "Reviewing changes" : "";
+        mode === 'edit' ? 'Editing' : mode === 'diff' ? 'Reviewing changes' : '';
     }
   }
 
   function pushUpdate() {
     renderFloat();
     send({
-      type: "ce:update",
+      type: 'ce:update',
       origin: ORIGIN,
       path: PATH,
       url: location.href,
@@ -923,28 +924,28 @@
     });
   }
 
-  function flash(id) {
+  function flash(id: string) {
     const span = spans.get(id);
     if (span) {
-      span.scrollIntoView({ behavior: "smooth", block: "center" });
-      span.classList.add("ce-flash");
-      setTimeout(() => span.classList.remove("ce-flash"), 1800);
+      span.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      span.classList.add('ce-flash');
+      setTimeout(() => span.classList.remove('ce-flash'), 1800);
       return true;
     }
     const img = imgEls.get(id);
     if (img) {
-      img.scrollIntoView({ behavior: "smooth", block: "center" });
-      img.classList.add("ce-flash");
-      setTimeout(() => img.classList.remove("ce-flash"), 1800);
+      img.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      img.classList.add('ce-flash');
+      setTimeout(() => img.classList.remove('ce-flash'), 1800);
       return true;
     }
     return false;
   }
 
   // Live updates: while editing, recompute + persist as the user types.
-  let pushTimer = null;
+  let pushTimer: any = null;
   function onInput() {
-    if (mode !== "edit") return;
+    if (mode !== 'edit') return;
     clearTimeout(pushTimer);
     pushTimer = setTimeout(async () => { await persist(); pushUpdate(); }, 250);
   }
@@ -953,7 +954,7 @@
   // 8. Mutations driven by the panel
   // ======================================================================
   // Revert one applied change (by id) or drop one orphan (by original+edited).
-  async function remove(payload) {
+  async function remove(payload: any) {
     if (payload.id != null && spans.has(payload.id)) {
       currents.set(payload.id, originals.get(payload.id));
       spans.get(payload.id).textContent = originals.get(payload.id);
@@ -961,7 +962,7 @@
       restoreImgAttrs(payload.id);
       imgCurrents.delete(payload.id);
       imgBlocked.delete(payload.id);
-      setImgOutline(mode === "diff");
+      setImgOutline(mode === 'diff');
     } else {
       orphans = orphans.filter(
         (o) => !(o.original === payload.original && o.edited === payload.edited)
@@ -997,25 +998,25 @@
   //     stale and tabs.onUpdated never fires "complete". We poll location and
   //     re-initialize for the new path.
   // ======================================================================
-  let navPoll = null;
-  let settleTimer = null;
+  let navPoll: any = null;
+  let settleTimer: any = null;
 
   function watchNavigation() {
-    window.addEventListener("popstate", onLocationMaybeChanged, true);
+    window.addEventListener('popstate', onLocationMaybeChanged, true);
     navPoll = setInterval(onLocationMaybeChanged, 500);
   }
   function unwatchNavigation() {
-    window.removeEventListener("popstate", onLocationMaybeChanged, true);
+    window.removeEventListener('popstate', onLocationMaybeChanged, true);
     clearInterval(navPoll); navPoll = null;
     stopSettle();
   }
 
   function onLocationMaybeChanged() {
     if (location.pathname === PATH) return; // unchanged or hash-only
-    if (mode === "edit") captureEdits();
+    if (mode === 'edit') captureEdits();
     try { persist(); } catch {}   // save the page we're leaving (persist captures old PATH)
     PATH = location.pathname;
-    reinitForPage().catch((err) => console.error("[Copy Edit] re-init failed:", err));
+    reinitForPage().catch((err) => console.error('[Copy Edit] re-init failed:', err));
   }
 
   // Drop the previous page's tracking (leaving our own UI intact) and rebuild
@@ -1045,15 +1046,15 @@
   // Wrap any text the page has rendered since the last pass. Skips re-applying
   // saved edits while editing so we never clobber the user's in-progress typing.
   function augment() {
-    if (mode === "edit") captureEdits();
+    if (mode === 'edit') captureEdits();
     const beforeText = spans.size;
     const beforeImg = imgEls.size;
     snapshot();
     if (spans.size === beforeText && imgEls.size === beforeImg) return; // nothing new
-    if (mode !== "edit") applySaved(savedChanges);
+    if (mode !== 'edit') applySaved(savedChanges);
     renderCurrentMode();
     renderImages();
-    setImgOutline(mode === "diff");
+    setImgOutline(mode === 'diff');
     pushUpdate();
   }
 
@@ -1075,10 +1076,10 @@
   // ======================================================================
   // Page CSS + message listener + teardown + boot
   // ======================================================================
-  let pageStyle = null;
+  let pageStyle: any = null;
   function injectPageStyle() {
-    const style = document.createElement("style");
-    style.setAttribute(UI_ATTR, "");
+    const style = document.createElement('style');
+    style.setAttribute(UI_ATTR, '');
     style.textContent = `
       .ce-review-mode .ce-track ins.ce-ins { background:#d7f5dd; text-decoration:none; border-radius:2px; box-shadow:0 0 0 1px #9ad8aa inset; }
       .ce-review-mode .ce-track del.ce-del { background:#ffd9d9; border-radius:2px; box-shadow:0 0 0 1px #f0a9a9 inset; }
@@ -1138,34 +1139,34 @@
     return style;
   }
 
-  function onMessage(msg, sender, sendResponse) {
+  function onMessage(msg: any, _sender: any, sendResponse: (response?: any) => void) {
     if (!msg || !msg.cmd) return;
     switch (msg.cmd) {
-      case "getState":
+      case 'getState':
         pushUpdate();
         sendResponse({ ok: true, mode });
         break;
-      case "setMode":
+      case 'setMode':
         setMode(msg.mode);
         sendResponse({ ok: true });
         break;
-      case "locate":
+      case 'locate':
         sendResponse({ ok: flash(msg.id) });
         break;
-      case "remove":
+      case 'remove':
         remove(msg);
         sendResponse({ ok: true });
         break;
-      case "reset":
+      case 'reset':
         reset();
         sendResponse({ ok: true });
         break;
-      case "teardown":
+      case 'teardown':
         teardown();
         sendResponse({ ok: true });
         break;
       default:
-        sendResponse({ ok: false, error: "unknown cmd" });
+        sendResponse({ ok: false, error: 'unknown cmd' });
     }
     // All branches respond synchronously.
   }
@@ -1176,8 +1177,8 @@
     // Best-effort flush of the latest edits before we revert (covers closing the
     // panel right after a keystroke, before the debounced persist fired).
     try { persist(); } catch {}
-    document.designMode = "off";
-    document.documentElement.classList.remove("ce-review-mode", "ce-edit-mode");
+    document.designMode = 'off';
+    document.documentElement.classList.remove('ce-review-mode', 'ce-edit-mode');
     for (const span of spans.values()) {
       const id = span.getAttribute(ID_ATTR);
       const text = document.createTextNode(originals.has(id) ? originals.get(id) : span.textContent);
@@ -1191,11 +1192,11 @@
     blobUrls.clear();
     setInterception(false);
     unwatchNavigation();
-    document.removeEventListener("input", onInput, true);
-    document.removeEventListener("mouseover", onImgHover, true);
-    document.removeEventListener("mouseout", onImgOut, true);
-    window.removeEventListener("scroll", positionOverlays, true);
-    window.removeEventListener("resize", positionOverlays, true);
+    document.removeEventListener('input', onInput, true);
+    document.removeEventListener('mouseover', onImgHover, true);
+    document.removeEventListener('mouseout', onImgOut, true);
+    window.removeEventListener('scroll', positionOverlays, true);
+    window.removeEventListener('resize', positionOverlays, true);
     try { chrome.runtime.onMessage.removeListener(onMessage); } catch {}
     floatEl && floatEl.remove();
     floatFrame && floatFrame.remove();
@@ -1205,7 +1206,7 @@
     imgBtn = imgInput = null; imgBtnId = null;
     pageStyle && pageStyle.remove();
     delete window.__copyEditTool;
-    send({ type: "ce:gone" });
+    send({ type: 'ce:gone' });
   }
 
   async function boot() {
@@ -1213,18 +1214,18 @@
     pageStyle = injectPageStyle();
     floatEl = injectFloat();
     injectImgUI();
-    document.addEventListener("input", onInput, true);
-    document.addEventListener("mouseover", onImgHover, true);
-    document.addEventListener("mouseout", onImgOut, true);
-    window.addEventListener("scroll", positionOverlays, true);
-    window.addEventListener("resize", positionOverlays, true);
+    document.addEventListener('input', onInput, true);
+    document.addEventListener('mouseover', onImgHover, true);
+    document.addEventListener('mouseout', onImgOut, true);
+    window.addEventListener('scroll', positionOverlays, true);
+    window.addEventListener('resize', positionOverlays, true);
     chrome.runtime.onMessage.addListener(onMessage);
     window.__copyEditTool = { teardown, pushUpdate };
     watchNavigation();
 
     const sessions = await getSessions();
     const session = sessions[ORIGIN];
-    mode = (session && session.mode) || "edit";
+    mode = (session && session.mode) || 'edit';
     savedChanges = (session && session.pages && session.pages[PATH] && session.pages[PATH].changes) || [];
     if (savedChanges.length) applySaved(savedChanges);
     enterMode(mode);
@@ -1233,7 +1234,7 @@
   }
 
   boot().catch((err) => {
-    console.error("[Copy Edit] failed to start:", err);
+    console.error('[Copy Edit] failed to start:', err);
     try { teardown(); } catch {}
   });
-})();
+});

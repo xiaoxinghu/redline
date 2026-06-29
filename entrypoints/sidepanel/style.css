@@ -112,7 +112,7 @@ html, body {
   white-space: nowrap;
 }
 
-/* Segmented mode control moved to the in-page floating toggle (content.js). */
+/* Segmented mode control moved to the in-page floating toggle (engine.ts). */
 
 /* Action buttons */
 .actions {
