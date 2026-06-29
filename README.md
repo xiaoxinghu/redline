@@ -1,10 +1,10 @@
 # Copy Edit — inline diff + changeset (Chrome extension)
 
 A Manifest V3 Chrome extension that lets a **content editor change web-page copy
-in place** from a **side panel**, then exports a **machine-readable changeset**
-that a developer can **re-apply on their own machine** to see exactly what
-changed and where — and that a **coding agent can read to locate the source in
-the codebase**.
+and images in place** from a **side panel**, then exports a **machine-readable
+changeset** that a developer can **re-apply on their own machine** to see exactly
+what changed and where — and that a **coding agent can read to locate the source
+in the codebase**.
 
 No backend, no AI, nothing leaves the browser.
 
@@ -27,14 +27,36 @@ Both use the File API — **no special permissions**, no `file://`, no file-type
 association:
 
 1. **Import** button → file picker.
-2. **Drag** the `.copyedit.json` onto the **side panel** (a drop overlay
-   appears). Share also copies the changeset to the clipboard.
+2. **Drag** the `.copyedit-bundle.zip` onto the **side panel** (a drop overlay
+   appears). Share also copies the JSON manifest to the clipboard.
 
 ### Location-aware apply
 If the changeset targets a different URL than the current tab, the tool stashes
 it and the panel offers **"Open & apply"**. Clicking it opens the target page
 **and auto-activates the tool there**, which re-applies the pending changeset on
 boot (valid for 10 minutes) — no second click needed.
+
+## Editing images
+
+In **Edit** mode, hovering any `<img>` reveals a **Replace image** button; click
+it to pick a local file and the image is swapped in place. The replacement is
+kept in the session and travels in the export bundle as a real file under
+`assets/`, referenced by filename from the changeset.
+
+### Preview adapts to the site's security policy
+A replaced image can only be shown on the page through a `data:`/`blob:` URL, and
+a site's **`img-src` Content-Security-Policy** decides whether the browser will
+load those. Copy Edit probes the live page once per origin and picks the best
+scheme it actually allows:
+
+1. **`data:`** on the real `<img>` (most sites — full fidelity), else
+2. **`blob:`** on the real `<img>` (when `data:` is blocked), else
+3. a small **badge** on the image explaining the preview is blocked.
+
+In every case the replacement is still saved and included in the export — only
+the *live preview* degrades on a strict-CSP site. (Scope is plain `<img>` for
+now; CSS background-images, `<picture>`/`srcset` swapping, and inline SVG are out
+of scope.)
 
 ## The UI lives in a side panel
 
@@ -45,9 +67,9 @@ of the panel is a **live list of every change** (with inline diffs).
 
 | Toolbar control | What it does |
 |-----------------|--------------|
-| **Edit / Review** | Segmented toggle. *Edit*: `designMode = "on"`, edit text in place with no markup. *Review*: editing off, each changed run renders inline `<ins>`/`<del>` on the page. |
-| **Share** | Download the changeset as `*.copyedit.json` (also copies it to the clipboard). |
-| **Import** | Load a `*.copyedit.json` via file picker and re-apply it (drag-and-drop onto the panel also works). |
+| **Edit / Review** | Segmented toggle. *Edit*: `designMode = "on"`, edit text in place with no markup; hovering any image shows a **Replace image** button. *Review*: editing off, each changed run renders inline `<ins>`/`<del>` and each replaced image gets an outline. |
+| **Share** | Download the changeset as a `*.copyedit-bundle.zip` (also copies the JSON manifest to the clipboard). |
+| **Import** | Load a `*.copyedit-bundle.zip` (or a legacy `*.copyedit-session.json`) via file picker and re-apply it (drag-and-drop onto the panel also works). |
 | **Done** | Stop editing and remove the in-page markup (your text edits stay). |
 
 **Reset = reload.** There is no Reset button — edits live only in memory, so a
@@ -57,58 +79,76 @@ re-activates fresh against it.
 Switching the active tab re-points the panel at the new tab; reloading the page
 re-activates the engine automatically.
 
-## The changeset format (`*.copyedit.json`)
+## The changeset format (`*.copyedit-bundle.zip`)
 
-This is the deliverable — designed to round-trip *and* to be read by a coding agent.
+The deliverable is a **zip bundle** — designed to round-trip *and* to be read by
+a coding agent:
+
+```
+acme-example-com.2026-06-25-12-00-00.copyedit-bundle.zip
+├── changeset.json        ← the machine-readable manifest (below)
+└── assets/
+    ├── img-1.png          ← replacement images, referenced by `file`
+    └── img-2.jpg
+```
+
+Text changes carry the exact `original`/`edited` strings inline; image changes
+carry the original `original` src plus a `file` pointing at the replacement in
+`assets/`. `changeset.json` looks like:
 
 ```jsonc
 {
-  "format": "copy-edit-changeset",
-  "version": 1,
+  "format": "copy-edit-session",
+  "version": 2,
   "readme": "…how to re-apply and how to locate the source in code…",
-  "page": {
-    "url": "https://acme.example.com/about",
-    "origin": "https://acme.example.com",
-    "path": "/about",
-    "title": "Acme — About",
-    "lang": "en",
-    "viewport": { "width": 1280, "height": 800 },
-    "capturedAt": "2026-06-25T…Z"
-  },
-  "summary": {
-    "changeCount": 4,
-    "distinctOriginals": ["beleive", "familys", …]
-  },
-  "changes": [
+  "origin": "https://acme.example.com",
+  "summary": { "pageCount": 1, "changeCount": 4, "imageCount": 1 },
+  "pages": [
     {
-      "index": 1,
-      "original": "At Acme, we beleive that everyone…",   // ← exact grep target
-      "edited":   "At Acme, we believe that everyone…",
-      "diffPreview": "At Acme, we [-beleive][+believe] that everyone…",
-      "element": {
-        "tag": "p",
-        "id": null,
-        "classes": ["IntroParagraph"],
-        "componentHint": "IntroParagraph",   // from data-component / data-testid / CSS-module class
-        "attributes": { "data-component": "IntroParagraph" },  // all data-* / aria-* + href/role/name/…
-        "selector": "body > p:nth-of-type(1)",   // id-aware, readable
-        "domPath": "body > p:nth-of-type(1)",     // deterministic positional path
-        "elementText": "At Acme, we beleive…",     // full element text for context
-        "textIndex": 0,                            // which text-run inside the element
-        "context": { "nearestHeading": "Welcome to Acme Insurance", "landmark": "main" }
-      }
+      "path": "/about",
+      "changes": [
+        {
+          "index": 1,
+          "kind": "text",
+          "original": "At Acme, we beleive that everyone…",   // ← exact grep target
+          "edited":   "At Acme, we believe that everyone…",
+          "diffPreview": "At Acme, we [-beleive][+believe] that everyone…",
+          "element": {
+            "tag": "p",
+            "componentHint": "IntroParagraph",   // from data-component / data-testid / CSS-module class
+            "attributes": { "data-component": "IntroParagraph" },
+            "selector": "body > p:nth-of-type(1)",
+            "domPath": "body > p:nth-of-type(1)",
+            "context": { "nearestHeading": "Our promise", "landmark": "main" }
+          }
+        },
+        {
+          "index": 2,
+          "kind": "image",
+          "original": "https://acme.example.com/hero.png",   // ← the image being replaced
+          "file": "assets/img-1.png",                          // ← the replacement, in this zip
+          "alt": "Family on a beach",
+          "element": {
+            "tag": "img",
+            "componentHint": "HeroImage",
+            "attributes": { "data-component": "HeroImage", "alt": "Family on a beach" },
+            "selector": "body > main > figure > img",
+            "context": { "nearestHeading": "Welcome to Acme Insurance", "landmark": "main" }
+          }
+        }
+      ]
     }
   ]
 }
 ```
 
 ### For a coding agent locating the source
-1. **Search the codebase for the exact `original` string** — usually the fastest hit.
-2. Disambiguate with `element.id`, `element.classes`, `element.componentHint`,
-   and `element.attributes` (`data-testid`/`data-component` map directly to React
-   components/props).
-3. Use `element.context.nearestHeading` + `page.path` to find the right
-   page/route/section when the same string appears more than once.
+1. **Text:** search the codebase for the exact `original` string — usually the fastest hit.
+2. **Images:** match on `element.selector`/`element.domPath`, `element.componentHint`,
+   `element.attributes` (`data-component`/`data-testid`), and the original `original`
+   src/filename; the intended new asset is the `file` in the bundle.
+3. Disambiguate with `element.id`, `element.classes`, and `element.context.nearestHeading`
+   + `page.path` when the same string/component appears more than once.
 
 > Mapping copy → source is inherently framework-dependent (the text may live in
 > JSX, a CMS, a JSON locale file, etc.). This format doesn't guess the file — it
@@ -143,9 +183,13 @@ This is the deliverable — designed to round-trip *and* to be read by a coding 
    tab, click the icon, and **Import** (or drag) the file.
 
 ## Known limitations (MVP)
-- Best for **editing existing text in place**. Big structural edits in
-  `designMode` (merging paragraphs, deleting blocks, Enter to make new nodes)
-  aren't fully tracked.
+- Best for **editing existing text in place** and **replacing existing `<img>`
+  elements**. Big structural edits in `designMode` (merging paragraphs, deleting
+  blocks, Enter to make new nodes) aren't fully tracked.
+- **Image preview vs. CSP:** on a site whose `img-src` policy blocks both `data:`
+  and `blob:`, the swapped image can't render live (a badge explains why) — the
+  replacement is still saved and exported. Image editing targets plain `<img>`
+  only (no CSS backgrounds, `<picture>`/`srcset`, or inline SVG).
 - Re-apply works best on the **same URL with matching content**; if the dev page
   has drifted, those changes show as **"not found"** in the panel (surfaced, not
   silently dropped). A page-path mismatch shows a warning banner.
@@ -154,12 +198,17 @@ This is the deliverable — designed to round-trip *and* to be read by a coding 
 
 ## Files
 - `manifest.json` — MV3 (`action` + `side_panel` + `scripting` + `activeTab` +
-  `storage` + `sidePanel`, plus `host_permissions` for `http(s)` so the panel
+  `storage` + `sidePanel` + `unlimitedStorage` (so replacement-image bytes fit
+  in `chrome.storage.local`), plus `host_permissions` for `http(s)` so the panel
   can inject the engine and "Open & apply" can auto-inject into a new tab).
 - `background.js` — service worker; opens the side panel on toolbar click
   (`setPanelBehavior`), and for "Open & apply" opens the target tab + injects.
 - `sidepanel.html` / `sidepanel.css` / `sidepanel.js` — the side-panel UI:
-  elegant toolbar + live change list, Share/Import, drag-and-drop, toasts.
+  elegant toolbar + live change list (text diffs + image before→after
+  thumbnails), Share/Import, drag-and-drop, toasts.
+- `zip.js` — a tiny dependency-free ZIP reader/writer (store method) used by the
+  panel to build and read the `*.copyedit-bundle.zip` export.
 - `content.js` — the in-page engine: snapshot, two-mode editing, inline diff,
-  export/import + location-aware apply. No UI of its own.
-- `test/sample.html` — page with typos and React-style attributes to try it on.
+  in-place image replacement with CSP-aware preview, export/import + location-aware
+  apply. No UI of its own beyond a floating mode toggle + the image hover button.
+- `test/sample.html` — page with typos, React-style attributes, and images to try it on.

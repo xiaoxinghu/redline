@@ -298,6 +298,27 @@ html, body {
 .mini ins { background: var(--ins-bg); color: var(--ins-ink); text-decoration: none; border-radius: 3px; padding: 0 1px; }
 .mini del { background: var(--del-bg); color: var(--del-ink); border-radius: 3px; padding: 0 1px; }
 
+/* Image change: before -> after thumbnails */
+.mini.img {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.mini.img .thumb {
+  flex: 0 0 auto;
+  width: 76px;
+  height: 56px;
+  object-fit: contain;
+  background:
+    linear-gradient(45deg, var(--line-soft) 25%, transparent 25%, transparent 75%, var(--line-soft) 75%) 0 0/14px 14px,
+    linear-gradient(45deg, var(--line-soft) 25%, var(--surface) 25%, var(--surface) 75%, var(--line-soft) 75%) 7px 7px/14px 14px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.mini.img .arrow { color: var(--ink-faint); font-weight: 700; }
+.badge.img { background: var(--accent-wash); color: var(--accent); }
+.ctx.warn { color: var(--warn-ink); }
+
 .sel {
   margin-top: 6px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;

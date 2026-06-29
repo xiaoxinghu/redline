@@ -54,14 +54,15 @@
   </div>
 
   <!-- Drag-and-drop overlay -->
-  <div id="drop" class="drop" hidden><div class="drop-box">Drop a <u>.copyedit-session.json</u> to apply</div></div>
+  <div id="drop" class="drop" hidden><div class="drop-box">Drop a <u>.copyedit-bundle.zip</u> (or <u>.copyedit-session.json</u>) to apply</div></div>
 
   <!-- Toasts -->
   <div id="toasts" class="toasts"></div>
 
   <!-- Hidden file picker for Import -->
-  <input id="file" type="file" accept=".json,application/json" hidden />
+  <input id="file" type="file" accept=".zip,application/zip,.json,application/json" hidden />
 
+  <script src="zip.js"></script>
   <script src="sidepanel.js"></script>
 </body>
 </html>

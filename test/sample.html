@@ -11,6 +11,10 @@
     .Hero_tagline__x7f2 { color: #5b6376; font-size: 18px; }
     footer { margin-top: 48px; color: #8b93a7; font-size: 14px; border-top: 1px solid #e7eaf2; padding-top: 16px; }
     button { font: inherit; padding: 8px 16px; border-radius: 8px; border: 0; background: #4c7dff; color: #fff; cursor: pointer; }
+    figure { margin: 24px 0; }
+    figure img { width: 100%; height: 220px; object-fit: cover; border-radius: 12px; display: block; }
+    .logo { width: 56px; height: 56px; border-radius: 12px; vertical-align: middle; }
+    figcaption { color: #8b93a7; font-size: 13px; margin-top: 6px; }
   </style>
 </head>
 <body>
@@ -20,11 +24,19 @@
       <a href="/about">About</a>
       <a href="/contact">Contact</a>
     </nav>
+    <img class="logo" data-component="BrandLogo" alt="Acme logo"
+         src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='56' height='56'><rect width='56' height='56' rx='12' fill='%234c7dff'/><text x='28' y='37' font-size='28' font-family='sans-serif' fill='white' text-anchor='middle'>A</text></svg>" />
   </header>
 
   <main>
     <h1>Welcome to Acme Insurance</h1>
     <p class="Hero_tagline__x7f2" data-component="Hero">Cover that's simple, fair, and allways on your side.</p>
+
+    <figure>
+      <img data-component="HeroImage" alt="Family on a beach"
+           src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='720' height='220'><rect width='720' height='220' fill='%23dfe7ff'/><text x='360' y='118' font-size='22' font-family='sans-serif' fill='%235b6376' text-anchor='middle'>hero image — hover to replace</text></svg>" />
+      <figcaption>Hover this image in Edit mode and click “Replace image”.</figcaption>
+    </figure>
 
     <h2>Our promise</h2>
     <p class="IntroParagraph" data-component="IntroParagraph">At Acme, we beleive that everyone deserves great cover without the jargon. We've helped thousands of familys protect what matters most.</p>

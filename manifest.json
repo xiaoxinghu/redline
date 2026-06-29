@@ -24,6 +24,6 @@
   "side_panel": {
     "default_path": "sidepanel.html"
   },
-  "permissions": ["scripting", "activeTab", "storage", "sidePanel"],
+  "permissions": ["scripting", "activeTab", "storage", "sidePanel", "unlimitedStorage"],
   "host_permissions": ["http://*/*", "https://*/*"]
 }

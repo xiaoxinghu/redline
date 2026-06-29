@@ -136,6 +136,34 @@ function diffPreview(original, edited) {
 }
 
 // ======================================================================
+// Image bytes <-> data URL + filename helpers (for the export/import bundle)
+// ======================================================================
+function dataUrlToBytes(dataUrl) {
+  const b64 = (dataUrl || "").split(",")[1] || "";
+  const bin = atob(b64);
+  const arr = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  return arr;
+}
+function bytesToDataUrl(bytes, mime) {
+  let bin = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  return `data:${mime || "image/png"};base64,` + btoa(bin);
+}
+const EXT_BY_MIME = { "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp", "image/svg+xml": "svg", "image/avif": "avif", "image/bmp": "bmp" };
+function extFor(mime, fileName) {
+  if (fileName && /\.[a-z0-9]+$/i.test(fileName)) return fileName.split(".").pop().toLowerCase();
+  return EXT_BY_MIME[mime] || "png";
+}
+const MIME_BY_EXT = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", svg: "image/svg+xml", avif: "image/avif", bmp: "image/bmp" };
+function mimeFor(file, fileType) {
+  if (fileType) return fileType;
+  const ext = (file.split(".").pop() || "").toLowerCase();
+  return MIME_BY_EXT[ext] || "image/png";
+}
+
+// ======================================================================
 // Messaging
 // ======================================================================
 function sendToTab(msg) {
@@ -249,54 +277,74 @@ async function doExport() {
   const entries = Object.entries(pages).filter(([, pg]) => (pg.changes || []).length);
   if (!entries.length) return toast("No changes to export yet.", "err");
 
-  const outPages = entries.map(([path, pg]) => ({
-    path,
-    title: pg.title || null,
-    url: pg.url || (origin + path),
-    changes: (pg.changes || []).map((c, i) => ({
-      index: i + 1,
-      original: c.original,
-      edited: c.edited,
-      diffPreview: diffPreview(c.original, c.edited),
-      element: c.element,
-    })),
-  }));
+  const assets = {}; // zip path -> Uint8Array
+  let imgCount = 0;
+
+  const outPages = entries.map(([path, pg]) => {
+    const changes = (pg.changes || []).map((c, i) => {
+      if (c.kind === "image") {
+        imgCount++;
+        const ext = extFor(c.fileType, c.fileName);
+        const file = `assets/img-${imgCount}.${ext}`;
+        try { assets[file] = dataUrlToBytes(c.edited); } catch {}
+        return {
+          index: i + 1, kind: "image",
+          original: c.original, file,
+          alt: c.alt || null, fileName: c.fileName || null, fileType: c.fileType || null,
+          element: c.element,
+        };
+      }
+      return {
+        index: i + 1, kind: "text",
+        original: c.original, edited: c.edited,
+        diffPreview: diffPreview(c.original, c.edited),
+        element: c.element,
+      };
+    });
+    return { path, title: pg.title || null, url: pg.url || (origin + path), changes };
+  });
   const changeCount = outPages.reduce((n, p) => n + p.changes.length, 0);
 
   const out = {
     format: "copy-edit-session",
-    version: 1,
+    version: 2,
     readme:
-      "Copy Edit session — text changes a content editor made across one site. " +
-      "Each page lists changes with the exact `original` and `edited` text. " +
-      "To locate in source: search the codebase for the `original` string. " +
-      "`element.selector`/`element.domPath`/`element.componentHint`/`element.attributes` " +
-      "help identify the component that renders it. Re-import this file to re-apply.",
+      "Copy Edit bundle — text + image changes a content editor made across one site. " +
+      "Text changes carry the exact `original`/`edited` strings. Image changes carry the " +
+      "original `original` src and a `file` pointing at the replacement image under assets/ " +
+      "in this zip. To locate in source: search the codebase for the `original` text (for " +
+      "images, use `element.selector`/`element.componentHint`/`element.attributes`). " +
+      "Re-import this .zip into Copy Edit to re-apply.",
     origin,
     exportedAt: new Date().toISOString(),
-    summary: { pageCount: outPages.length, changeCount },
+    summary: { pageCount: outPages.length, changeCount, imageCount: imgCount },
     pages: outPages,
   };
 
   const json = JSON.stringify(out, null, 2);
+  assets["changeset.json"] = new TextEncoder().encode(json);
+  const zipped = window.CEZip.zipSync(assets);
+
   const slug = (origin || "site").replace(/^https?:\/\//, "").replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "");
   const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
-  const blob = new Blob([json], { type: "application/json" });
+  const blob = new Blob([zipped], { type: "application/zip" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `${slug}.${stamp}.copyedit-session.json`;
+  a.download = `${slug}.${stamp}.copyedit-bundle.zip`;
   document.body.appendChild(a);
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 4000);
 
-  const noun = `${changeCount} change${changeCount === 1 ? "" : "s"} across ${outPages.length} page${outPages.length === 1 ? "" : "s"}`;
+  const noun =
+    `${changeCount} change${changeCount === 1 ? "" : "s"} across ${outPages.length} page${outPages.length === 1 ? "" : "s"}` +
+    (imgCount ? ` (${imgCount} image${imgCount === 1 ? "" : "s"})` : "");
   try {
     await navigator.clipboard.writeText(json);
-    toast(`Exported ${noun} — file downloaded + copied to clipboard.`);
+    toast(`Exported ${noun} — bundle downloaded + manifest copied to clipboard.`);
   } catch {
-    toast(`Exported ${noun} — file downloaded.`);
+    toast(`Exported ${noun} — bundle downloaded.`);
   }
 }
 
@@ -331,14 +379,25 @@ els.file.addEventListener("change", async () => {
 });
 
 async function applyFile(file) {
-  let data;
+  let data, assets = null;
   try {
-    data = JSON.parse(await file.text());
+    if (await isZipFile(file)) {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const files = window.CEZip.unzipSync(bytes);
+      const name =
+        Object.keys(files).find((n) => /(^|\/)changeset\.json$/i.test(n)) ||
+        Object.keys(files).find((n) => /\.json$/i.test(n));
+      if (!name) return toast("Bundle is missing changeset.json.", "err");
+      data = JSON.parse(new TextDecoder().decode(files[name]));
+      assets = files;
+    } else {
+      data = JSON.parse(await file.text());
+    }
   } catch {
-    return toast("Could not read that file as JSON.", "err");
+    return toast("Could not read that file (expected a .zip bundle or .json).", "err");
   }
   if (!data || data.format !== "copy-edit-session" || !data.origin) {
-    return toast("That isn't a Copy Edit session file.", "err");
+    return toast("That isn't a Copy Edit changeset.", "err");
   }
 
   const sessions = await getSessions();
@@ -349,7 +408,21 @@ async function applyFile(file) {
       title: pg.title || null,
       url: pg.url || (data.origin + pg.path),
       updatedAt: Date.now(),
-      changes: (pg.changes || []).map((c) => ({ element: c.element, original: c.original, edited: c.edited })),
+      changes: (pg.changes || [])
+        .map((c) => {
+          if (c.kind === "image") {
+            let edited = c.edited;
+            if (!edited && c.file && assets && assets[c.file]) {
+              edited = bytesToDataUrl(assets[c.file], mimeFor(c.file, c.fileType));
+            }
+            return {
+              kind: "image", element: c.element, original: c.original, edited,
+              alt: c.alt || null, fileName: c.fileName || null, fileType: c.fileType || null,
+            };
+          }
+          return { element: c.element, original: c.original, edited: c.edited };
+        })
+        .filter((c) => c.edited != null),
     };
   }
   sessions[data.origin] = session;
@@ -361,6 +434,17 @@ async function applyFile(file) {
   } else {
     toast(`Imported ${data.summary?.changeCount ?? ""} change(s) for ${data.origin}. Visit that site to see them.`.replace("  ", " "));
   }
+}
+
+// A bundle is a zip; a legacy session is plain JSON. Sniff by extension, then
+// by the "PK" magic bytes so a renamed/typeless file still routes correctly.
+async function isZipFile(file) {
+  if (/\.zip$/i.test(file.name)) return true;
+  if (/\.json$/i.test(file.name)) return false;
+  try {
+    const head = new Uint8Array(await file.slice(0, 2).arrayBuffer());
+    return head[0] === 0x50 && head[1] === 0x4b; // "PK"
+  } catch { return false; }
 }
 
 // Drag a session file onto the panel.
@@ -430,6 +514,7 @@ async function render() {
     const rows = (pg.changes || []).map((c) => ({
       id: null,
       status: "saved",
+      kind: c.kind === "image" ? "image" : "text",
       original: c.original,
       edited: c.edited,
       element: c.element || {},
@@ -500,6 +585,13 @@ function renderRow(r, isCurrent) {
     top.appendChild(badge);
   }
 
+  if (r.kind === "image") {
+    const ib = document.createElement("span");
+    ib.className = "badge img";
+    ib.textContent = "image";
+    top.appendChild(ib);
+  }
+
   const tag = document.createElement("span");
   tag.className = "tag";
   tag.textContent = `<${el.tag || "?"}>` + (el.componentHint ? ` · ${el.componentHint}` : "");
@@ -529,9 +621,32 @@ function renderRow(r, isCurrent) {
   row.appendChild(top);
 
   const mini = document.createElement("div");
-  mini.className = "mini";
-  mini.appendChild(diffNodes(r.original, r.edited));
+  if (r.kind === "image") {
+    mini.className = "mini img";
+    const before = document.createElement("img");
+    before.className = "thumb";
+    before.alt = "before";
+    if (r.original) before.src = r.original;
+    const arrow = document.createElement("span");
+    arrow.className = "arrow";
+    arrow.textContent = "\u2192";
+    const after = document.createElement("img");
+    after.className = "thumb";
+    after.alt = "after";
+    if (r.edited) after.src = r.edited;
+    mini.append(before, arrow, after);
+  } else {
+    mini.className = "mini";
+    mini.appendChild(diffNodes(r.original, r.edited));
+  }
   row.appendChild(mini);
+
+  if (r.kind === "image" && r.previewBlocked) {
+    const note = document.createElement("div");
+    note.className = "ctx warn";
+    note.textContent = "Preview blocked on the live site \u2014 saved & will be exported.";
+    row.appendChild(note);
+  }
 
   const sel = document.createElement("div");
   sel.className = "sel";

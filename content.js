@@ -37,6 +37,7 @@
 
   const UI_ATTR = "data-ce-ui";
   const ID_ATTR = "data-ce-id";
+  const IMG_ID_ATTR = "data-ce-img-id";
   const SESSIONS_KEY = "copyedit_sessions";
   const SKIP_TAGS = new Set([
     "SCRIPT", "STYLE", "NOSCRIPT", "TEXTAREA", "CODE", "PRE", "SVG", "CANVAS",
@@ -51,6 +52,14 @@
   const descriptors = new Map(); // id -> element identity (computed pristine)
   let orphans = [];              // saved changes that couldn't be applied here
   let savedChanges = [];         // this page's saved edits, for re-applying to late content
+
+  // Image replacement registry (parallel to the text maps above). Images are
+  // mutated in place rather than wrapped, so we track them by their own id.
+  const imgEls = new Map();        // id -> <img>
+  const imgOriginals = new Map();  // id -> { src, srcset, sizes, alt } (pristine)
+  const imgCurrents = new Map();   // id -> { dataUrl, fileName, fileType } (replacement)
+  const imgDescriptors = new Map();// id -> element identity (computed pristine)
+  const imgBlocked = new Set();    // ids whose preview the page's CSP refused
 
   let mode = "edit";             // edit | preview | diff
   let preDiffMode = "edit";       // mode to return to when the Diff switch is off
@@ -96,7 +105,7 @@
   }
 
   function collectAttrs(el) {
-    const keep = ["role", "name", "type", "href", "alt", "title", "placeholder", "for"];
+    const keep = ["role", "name", "type", "href", "src", "srcset", "alt", "title", "placeholder", "for"];
     const out = {};
     for (const k of keep) if (el.hasAttribute(k)) out[k] = el.getAttribute(k);
     for (const a of el.attributes) {
@@ -164,6 +173,21 @@
     };
   }
 
+  /** Identity descriptor for a whole element (used for images, which aren't wrapped). */
+  function describeElement(el) {
+    return {
+      tag: el.tagName.toLowerCase(),
+      id: el.id || null,
+      classes: [...el.classList],
+      componentHint: componentHint(el),
+      attributes: collectAttrs(el),
+      selector: cssPath(el),
+      domPath: domPath(el),
+      elementText: (el.textContent || "").trim().replace(/\s+/g, " ").slice(0, 200),
+      context: { nearestHeading: nearestHeading(el), landmark: nearestLandmark(el) },
+    };
+  }
+
   // ======================================================================
   // 1. Snapshot  (collect → describe pristine → wrap)
   //
@@ -173,6 +197,7 @@
   // ======================================================================
   function snapshot() {
     allHeadings = [...document.querySelectorAll("h1,h2,h3,h4,h5,h6")];
+    snapshotImages();
 
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
       acceptNode(node) {
@@ -337,6 +362,7 @@
   function applySaved(changes) {
     orphans = [];
     for (const change of changes || []) {
+      if (change.kind === "image") { applyOneImage(change); continue; }
       const span = findSpanForChange(change);
       if (span && originals.get(span.getAttribute(ID_ATTR)) === change.original) {
         currents.set(span.getAttribute(ID_ATTR), change.edited);
@@ -344,6 +370,269 @@
         orphans.push({ element: change.element || {}, original: change.original, edited: change.edited });
       }
     }
+  }
+
+  // ======================================================================
+  // 4b. Images  (replace any <img> in place; preview adapts to the site's CSP)
+  //
+  // Images aren't wrapped like text — we mutate the <img> directly and keep a
+  // parallel registry (imgEls/imgOriginals/imgCurrents/imgDescriptors). A
+  // replacement is stored as a data: URL so it round-trips through storage and
+  // the export bundle; the on-page PREVIEW picks the best scheme the page's CSP
+  // actually allows, probed once per origin:
+  //   data:  -> set <img src> to the data: URL            (most sites)
+  //   blob:  -> set <img src> to an object URL             (data: blocked)
+  //   none   -> keep the original image, show a badge       (both blocked)
+  // ======================================================================
+  const PROBE_PNG =
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
+
+  function probeImg(src) {
+    return new Promise((resolve) => {
+      const im = new Image();
+      let done = false;
+      const fin = (v) => { if (!done) { done = true; resolve(v); } };
+      im.onload = () => fin(im.naturalWidth > 0);
+      im.onerror = () => fin(false);
+      setTimeout(() => fin(false), 1500);
+      im.src = src;
+    });
+  }
+
+  let _imgScheme; // undefined until probed; then "data" | "blob" | "none"
+  async function getImgScheme() {
+    if (_imgScheme !== undefined) return _imgScheme;
+    if (await probeImg(PROBE_PNG)) return (_imgScheme = "data");
+    let url = null;
+    try {
+      url = URL.createObjectURL(dataUrlToBlob(PROBE_PNG, "image/png"));
+      _imgScheme = (await probeImg(url)) ? "blob" : "none";
+    } catch { _imgScheme = "none"; }
+    finally { if (url) URL.revokeObjectURL(url); }
+    return _imgScheme;
+  }
+
+  function dataUrlToBlob(dataUrl, type) {
+    const comma = dataUrl.indexOf(",");
+    const meta = dataUrl.slice(0, comma);
+    const bin = atob(dataUrl.slice(comma + 1));
+    const arr = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+    const mime = type || (meta.match(/data:([^;]+)/) || [])[1] || "image/png";
+    return new Blob([arr], { type: mime });
+  }
+
+  const blobUrls = new Map(); // id -> object URL (revoke on change/teardown)
+  function ensureBlobUrl(id, cur) {
+    revokeBlob(id);
+    const u = URL.createObjectURL(dataUrlToBlob(cur.dataUrl, cur.fileType));
+    blobUrls.set(id, u);
+    return u;
+  }
+  function revokeBlob(id) {
+    const u = blobUrls.get(id);
+    if (u) { URL.revokeObjectURL(u); blobUrls.delete(id); }
+  }
+
+  // Tag every untracked <img> (idempotent — safe to re-run for late content).
+  function snapshotImages() {
+    for (const img of document.querySelectorAll("img")) {
+      if (img.closest(`[${UI_ATTR}]`)) continue;
+      if (img.hasAttribute(IMG_ID_ATTR)) continue;
+      const id = "ceimg-" + idCounter++;
+      img.setAttribute(IMG_ID_ATTR, id);
+      imgEls.set(id, img);
+      imgOriginals.set(id, {
+        src: img.currentSrc || img.getAttribute("src") || img.src || "",
+        srcset: img.getAttribute("srcset"),
+        sizes: img.getAttribute("sizes"),
+        alt: img.getAttribute("alt"),
+      });
+      imgDescriptors.set(id, describeElement(img));
+    }
+  }
+
+  function restoreImgAttrs(id) {
+    const img = imgEls.get(id), o = imgOriginals.get(id);
+    revokeBlob(id);
+    removeBadge(id);
+    if (!img || !o) return;
+    img.onerror = null;
+    if (o.srcset) img.setAttribute("srcset", o.srcset); else img.removeAttribute("srcset");
+    if (o.sizes) img.setAttribute("sizes", o.sizes); else img.removeAttribute("sizes");
+    if (o.src != null) img.src = o.src;
+    img.classList.remove("ce-img-changed");
+  }
+
+  // Both schemes refused: keep the original image visible, flag it with a badge.
+  function applyBlocked(id) {
+    const img = imgEls.get(id), o = imgOriginals.get(id);
+    revokeBlob(id);
+    if (img && o) { img.onerror = null; if (o.src != null) img.src = o.src; }
+    imgBlocked.add(id);
+    showBadge(id);
+  }
+
+  async function setImgPreview(id) {
+    const img = imgEls.get(id);
+    const cur = imgCurrents.get(id);
+    if (!img) return;
+    if (!cur) { restoreImgAttrs(id); imgBlocked.delete(id); return; }
+    const scheme = await getImgScheme();
+    if (!imgEls.has(id) || imgCurrents.get(id) !== cur) return; // changed mid-await
+    img.removeAttribute("srcset");
+    img.removeAttribute("sizes");
+    if (scheme === "none") { applyBlocked(id); return; }
+    imgBlocked.delete(id);
+    removeBadge(id);
+    img.onerror = () => { img.onerror = null; applyBlocked(id); pushUpdate(); };
+    img.src = scheme === "blob" ? ensureBlobUrl(id, cur) : cur.dataUrl;
+  }
+
+  function renderImages() {
+    for (const id of imgCurrents.keys()) setImgPreview(id);
+  }
+
+  function setImgOutline(on) {
+    for (const [id, img] of imgEls) {
+      img.classList.toggle("ce-img-changed", !!(on && imgCurrents.get(id)));
+    }
+  }
+
+  function replaceImageFromFile(id, file) {
+    if (!file || !/^image\//.test(file.type)) return;
+    const reader = new FileReader();
+    reader.onload = async () => {
+      imgCurrents.set(id, { dataUrl: String(reader.result), fileName: file.name, fileType: file.type });
+      await setImgPreview(id);
+      setImgOutline(mode === "diff");
+      await persist();
+      pushUpdate();
+    };
+    reader.readAsDataURL(file);
+  }
+
+  // For storage/export: one record per replaced image.
+  function buildImageChanges() {
+    const out = [];
+    for (const [id, cur] of imgCurrents) {
+      if (!cur) continue;
+      const o = imgOriginals.get(id) || {};
+      out.push({
+        kind: "image",
+        element: imgDescriptors.get(id),
+        original: o.src || "",
+        edited: cur.dataUrl,
+        alt: o.alt || null,
+        fileName: cur.fileName || null,
+        fileType: cur.fileType || null,
+      });
+    }
+    return out;
+  }
+
+  function applyOneImage(change) {
+    const target = resolveElement(change.element || {});
+    if (target && target.tagName === "IMG" && target.hasAttribute(IMG_ID_ATTR)) {
+      imgCurrents.set(target.getAttribute(IMG_ID_ATTR), {
+        dataUrl: change.edited, fileName: change.fileName, fileType: change.fileType,
+      });
+    } else {
+      orphans.push({
+        kind: "image", element: change.element || {},
+        original: change.original, edited: change.edited,
+        fileName: change.fileName, fileType: change.fileType,
+      });
+    }
+  }
+
+  // --- Blocked-preview badge + hover "Replace image" button ----------------
+  const badges = new Map(); // id -> badge element
+  function showBadge(id) {
+    if (badges.has(id)) return;
+    const b = document.createElement("div");
+    b.setAttribute(UI_ATTR, "");
+    b.setAttribute("contenteditable", "false");
+    b.className = "ce-img-badge";
+    b.textContent = "\u26A0 Preview blocked by this site";
+    b.title = "This site's security policy (CSP img-src) blocks images we add, so the " +
+      "replacement can't display here. It's still saved and included when you export.";
+    document.body.appendChild(b);
+    badges.set(id, b);
+    positionBadge(id);
+  }
+  function removeBadge(id) { const b = badges.get(id); if (b) { b.remove(); badges.delete(id); } }
+  function removeAllBadges() { for (const b of badges.values()) b.remove(); badges.clear(); }
+  function positionBadge(id) {
+    const b = badges.get(id), img = imgEls.get(id);
+    if (!b || !img) return;
+    const r = img.getBoundingClientRect();
+    b.style.left = Math.max(6, r.left + 6) + "px";
+    b.style.top = Math.max(6, r.top + 6) + "px";
+  }
+
+  let imgBtn = null, imgInput = null, imgBtnId = null, pendingImgId = null;
+  function injectImgUI() {
+    imgInput = document.createElement("input");
+    imgInput.type = "file";
+    imgInput.accept = "image/*";
+    imgInput.setAttribute(UI_ATTR, "");
+    imgInput.style.display = "none";
+    imgInput.addEventListener("change", () => {
+      const f = imgInput.files && imgInput.files[0];
+      const id = pendingImgId;   // captured at click time — hover/hide can't clear it
+      pendingImgId = null;
+      imgInput.value = "";
+      if (f && id) replaceImageFromFile(id, f);
+    });
+
+    imgBtn = document.createElement("button");
+    imgBtn.type = "button";
+    imgBtn.id = "ce-img-btn";
+    imgBtn.setAttribute(UI_ATTR, "");
+    imgBtn.setAttribute("contenteditable", "false");
+    imgBtn.textContent = "\u2B06 Replace image";
+    imgBtn.style.display = "none";
+    imgBtn.addEventListener("click", (e) => {
+      e.preventDefault(); e.stopPropagation();
+      if (!imgBtnId) return;
+      pendingImgId = imgBtnId;   // remember the target before the dialog steals hover
+      imgInput.click();
+    });
+
+    document.body.append(imgInput, imgBtn);
+  }
+
+  function positionImgBtn() {
+    const img = imgEls.get(imgBtnId);
+    if (!img) return hideImgBtn();
+    const r = img.getBoundingClientRect();
+    if (r.width < 1 || r.bottom < 0 || r.top > innerHeight) return hideImgBtn();
+    imgBtn.style.left = Math.max(6, r.right - imgBtn.offsetWidth - 8) + "px";
+    imgBtn.style.top = Math.max(6, r.top + 8) + "px";
+  }
+  function showImgBtn(img) {
+    imgBtnId = img.getAttribute(IMG_ID_ATTR);
+    imgBtn.style.display = "inline-flex";
+    positionImgBtn();
+  }
+  function hideImgBtn() { if (imgBtn) imgBtn.style.display = "none"; imgBtnId = null; }
+
+  function onImgHover(e) {
+    if (mode !== "edit") return;
+    const t = e.target;
+    if (t && t.tagName === "IMG" && t.hasAttribute(IMG_ID_ATTR)) showImgBtn(t);
+  }
+  function onImgOut(e) {
+    if (mode !== "edit") return;
+    const to = e.relatedTarget;
+    if (to === imgBtn) return;
+    if (to && to.tagName === "IMG" && to.hasAttribute(IMG_ID_ATTR)) return;
+    hideImgBtn();
+  }
+  function positionOverlays() {
+    if (imgBtn && imgBtn.style.display !== "none") positionImgBtn();
+    for (const id of badges.keys()) positionBadge(id);
   }
 
   // ======================================================================
@@ -416,6 +705,8 @@
     }
     document.designMode = "on";
     setInterception(true);
+    renderImages();
+    setImgOutline(false);
     mode = "edit";
   }
 
@@ -425,6 +716,9 @@
     document.designMode = "off";
     setInterception(false);
     renderPlain();
+    renderImages();
+    setImgOutline(false);
+    hideImgBtn();
     mode = "preview";
   }
 
@@ -435,6 +729,9 @@
     document.designMode = "off";
     setInterception(true);
     renderDiff();
+    renderImages();
+    setImgOutline(true);
+    hideImgBtn();
     mode = "diff";
   }
 
@@ -470,14 +767,14 @@
     return ids;
   }
 
-  // For storage: applied edits on this page + any unresolved saved edits.
+  // For storage: applied edits on this page + replaced images + unresolved saved edits.
   function buildPageChanges() {
     const applied = changedIds().map((id) => ({
       element: descriptors.get(id),
       original: originals.get(id),
       edited: currentText(id),
     }));
-    return applied.concat(orphans);
+    return applied.concat(buildImageChanges(), orphans);
   }
 
   // For the panel: current-page rows with live status + ids for Locate.
@@ -492,11 +789,25 @@
     const warn = orphans.map((c) => ({
       id: null,
       status: "warning",
+      kind: c.kind === "image" ? "image" : "text",
       original: c.original,
       edited: c.edited,
       element: c.element || {},
     }));
-    return rows.concat(warn);
+    const imgRows = [];
+    for (const [id, cur] of imgCurrents) {
+      if (!cur) continue;
+      imgRows.push({
+        id,
+        status: "applied",
+        kind: "image",
+        previewBlocked: imgBlocked.has(id),
+        original: (imgOriginals.get(id) || {}).src || "",
+        edited: cur.dataUrl,
+        element: imgDescriptors.get(id),
+      });
+    }
+    return rows.concat(imgRows, warn);
   }
 
   // ======================================================================
@@ -614,11 +925,20 @@
 
   function flash(id) {
     const span = spans.get(id);
-    if (!span) return false;
-    span.scrollIntoView({ behavior: "smooth", block: "center" });
-    span.classList.add("ce-flash");
-    setTimeout(() => span.classList.remove("ce-flash"), 1800);
-    return true;
+    if (span) {
+      span.scrollIntoView({ behavior: "smooth", block: "center" });
+      span.classList.add("ce-flash");
+      setTimeout(() => span.classList.remove("ce-flash"), 1800);
+      return true;
+    }
+    const img = imgEls.get(id);
+    if (img) {
+      img.scrollIntoView({ behavior: "smooth", block: "center" });
+      img.classList.add("ce-flash");
+      setTimeout(() => img.classList.remove("ce-flash"), 1800);
+      return true;
+    }
+    return false;
   }
 
   // Live updates: while editing, recompute + persist as the user types.
@@ -637,6 +957,11 @@
     if (payload.id != null && spans.has(payload.id)) {
       currents.set(payload.id, originals.get(payload.id));
       spans.get(payload.id).textContent = originals.get(payload.id);
+    } else if (payload.id != null && imgEls.has(payload.id)) {
+      restoreImgAttrs(payload.id);
+      imgCurrents.delete(payload.id);
+      imgBlocked.delete(payload.id);
+      setImgOutline(mode === "diff");
     } else {
       orphans = orphans.filter(
         (o) => !(o.original === payload.original && o.edited === payload.edited)
@@ -650,6 +975,11 @@
   // Does NOT persist — the panel has already removed the session from storage.
   function reset() {
     for (const [id, original] of originals) currents.set(id, original);
+    for (const id of [...imgCurrents.keys()]) restoreImgAttrs(id);
+    imgCurrents.clear();
+    imgBlocked.clear();
+    removeAllBadges();
+    setImgOutline(false);
     orphans = [];
     savedChanges = [];
     renderCurrentMode();
@@ -698,6 +1028,9 @@
       span.parentNode && span.parentNode.replaceChild(text, span);
     }
     spans.clear(); originals.clear(); currents.clear(); descriptors.clear(); orphans = [];
+    for (const id of [...imgEls.keys()]) { restoreImgAttrs(id); const im = imgEls.get(id); im && im.removeAttribute(IMG_ID_ATTR); }
+    imgEls.clear(); imgOriginals.clear(); imgCurrents.clear(); imgDescriptors.clear(); imgBlocked.clear();
+    removeAllBadges(); hideImgBtn();
 
     snapshot();
     const sessions = await getSessions();
@@ -713,11 +1046,14 @@
   // saved edits while editing so we never clobber the user's in-progress typing.
   function augment() {
     if (mode === "edit") captureEdits();
-    const before = spans.size;
+    const beforeText = spans.size;
+    const beforeImg = imgEls.size;
     snapshot();
-    if (spans.size === before) return; // nothing new
+    if (spans.size === beforeText && imgEls.size === beforeImg) return; // nothing new
     if (mode !== "edit") applySaved(savedChanges);
     renderCurrentMode();
+    renderImages();
+    setImgOutline(mode === "diff");
     pushUpdate();
   }
 
@@ -790,6 +1126,13 @@
         .ce-edit-mode #ce-frame { animation:none; box-shadow: inset 0 0 0 3px rgba(108,99,255,.9), inset 0 0 26px 4px rgba(76,125,255,.4) !important; }
         #ce-frame .ce-frame-dot { animation:none; }
       }
+
+      /* Image edit: hover "Replace" button, blocked-preview badge, diff outline. */
+      img.ce-flash { animation: ce-flash-kf 1.8s ease; }
+      .ce-review-mode img.ce-img-changed { outline:3px solid #f5a623 !important; outline-offset:2px; box-shadow:0 0 0 6px rgba(245,160,35,.28) !important; }
+      #ce-img-btn { position:fixed !important; z-index:2147483647 !important; display:none; align-items:center !important; gap:6px !important; margin:0 !important; padding:8px 12px !important; border:0 !important; border-radius:9px !important; cursor:pointer !important; color:#fff !important; font:600 12px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif !important; letter-spacing:.2px; background:linear-gradient(135deg,#4c7dff,#6f57ff) !important; box-shadow:0 6px 18px rgba(20,24,40,.32) !important; }
+      #ce-img-btn:hover { filter:brightness(1.08); }
+      .ce-img-badge { position:fixed !important; z-index:2147483647 !important; max-width:230px !important; padding:6px 10px !important; border-radius:8px !important; background:rgba(20,24,40,.92) !important; color:#fff !important; font:600 11px/1.35 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif !important; box-shadow:0 6px 18px rgba(0,0,0,.38) !important; pointer-events:auto !important; }
     `;
     document.head.appendChild(style);
     return style;
@@ -841,13 +1184,25 @@
       span.parentNode && span.parentNode.replaceChild(text, span);
     }
     spans.clear(); originals.clear(); currents.clear(); descriptors.clear(); orphans = [];
+    for (const id of [...imgEls.keys()]) { restoreImgAttrs(id); const im = imgEls.get(id); im && im.removeAttribute(IMG_ID_ATTR); }
+    imgEls.clear(); imgOriginals.clear(); imgCurrents.clear(); imgDescriptors.clear(); imgBlocked.clear();
+    removeAllBadges();
+    for (const u of blobUrls.values()) { try { URL.revokeObjectURL(u); } catch {} }
+    blobUrls.clear();
     setInterception(false);
     unwatchNavigation();
     document.removeEventListener("input", onInput, true);
+    document.removeEventListener("mouseover", onImgHover, true);
+    document.removeEventListener("mouseout", onImgOut, true);
+    window.removeEventListener("scroll", positionOverlays, true);
+    window.removeEventListener("resize", positionOverlays, true);
     try { chrome.runtime.onMessage.removeListener(onMessage); } catch {}
     floatEl && floatEl.remove();
     floatFrame && floatFrame.remove();
     floatEl = floatPrimary = floatDiff = floatSep = floatFrame = floatFrameText = null;
+    imgBtn && imgBtn.remove();
+    imgInput && imgInput.remove();
+    imgBtn = imgInput = null; imgBtnId = null;
     pageStyle && pageStyle.remove();
     delete window.__copyEditTool;
     send({ type: "ce:gone" });
@@ -857,7 +1212,12 @@
     snapshot();
     pageStyle = injectPageStyle();
     floatEl = injectFloat();
+    injectImgUI();
     document.addEventListener("input", onInput, true);
+    document.addEventListener("mouseover", onImgHover, true);
+    document.addEventListener("mouseout", onImgOut, true);
+    window.addEventListener("scroll", positionOverlays, true);
+    window.addEventListener("resize", positionOverlays, true);
     chrome.runtime.onMessage.addListener(onMessage);
     window.__copyEditTool = { teardown, pushUpdate };
     watchNavigation();
