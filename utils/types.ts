@@ -68,6 +68,14 @@ export interface Row {
   _path?: string;
 }
 
+/** A page-grouped bundle of rows, as rendered by the panel's change list. */
+export interface Group {
+  path: string;
+  title?: string | null;
+  current: boolean;
+  rows: Row[];
+}
+
 /** engine → panel: live state of the current page. */
 export interface UpdateMessage {
   type: 'ce:update';

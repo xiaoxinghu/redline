@@ -9,6 +9,7 @@ import { defineConfig } from 'wxt';
 //                                       by the side panel via chrome.scripting.executeScript)
 // The rest (name, action, permissions, host permissions) is declared here.
 export default defineConfig({
+  modules: ['@wxt-dev/module-solid'],
   manifest: {
     name: 'Copy Edit — inline diff',
     action: {

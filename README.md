@@ -225,15 +225,23 @@ WXT bundles `entrypoints/` into the extension; `manifest.json` is generated.
   `background` / `icons` from the entrypoints + `public/`.
 - `entrypoints/background.ts` — service worker; opens the side panel on toolbar
   click (`setPanelBehavior`) and tears the engine down when the panel closes.
-- `entrypoints/sidepanel/` (`index.html` / `style.css` / `main.ts`) — the
-  side-panel UI: elegant toolbar + live change list (text diffs + image
-  before→after thumbnails), Share/Import, drag-and-drop, toasts.
+- `entrypoints/sidepanel/` — the side-panel UI, a **SolidJS** app
+  (`@wxt-dev/module-solid`). `index.html` mounts `main.tsx`, which renders
+  `App.tsx`; `store.ts` holds all chrome messaging/storage behind reactive
+  signals (exposed via `usePanel()`), and `components/` breaks the UI into
+  reusable pieces (`Toolbar`, `ChangeList` → `ChangeGroup` → `ChangeRow`,
+  `Diff`, `StateMessage`, `DropOverlay`, `Toasts`). `style.css` is shared.
+  Together: elegant toolbar + live change list (text diffs + image before→after
+  thumbnails), Share/Import, drag-and-drop, toasts.
 - `entrypoints/engine.ts` — the in-page engine (built to `/engine.js`): snapshot,
   three-mode editing, inline diff, in-place image replacement with CSP-aware
   preview, export/import + location-aware apply. No UI of its own beyond a
   floating mode toggle + the image hover button.
 - `utils/zip.ts` — a tiny dependency-free ZIP reader/writer (store method) used
   by the panel to build and read the `*.copyedit-bundle.zip` export.
+- `utils/bundle.ts` — builds/reads the export bundle (zip + image bytes) on top
+  of `zip.ts`; `utils/diff.ts` — the word-level diff shared by the UI + export;
+  `utils/sessions.ts` — per-origin `chrome.storage.local` session helpers.
 - `utils/types.ts` — shared TypeScript types for the changeset/session/message
   contracts.
 - `public/icon/` — toolbar/extension icons (auto-discovered by WXT).

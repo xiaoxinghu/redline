@@ -7,6 +7,10 @@
     // Tighten incrementally over time.
     "noImplicitAny": false,
     "strictNullChecks": false,
+    // SolidJS JSX: vite-plugin-solid does the real transform at build time;
+    // these just let `tsc --noEmit` understand the .tsx side-panel UI.
+    "jsx": "preserve",
+    "jsxImportSource": "solid-js",
     "types": ["chrome"]
   }
 }

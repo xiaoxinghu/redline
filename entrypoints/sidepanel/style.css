@@ -65,6 +65,9 @@ html, body {
   height: 100%;
 }
 
+/* The SolidJS app mounts into #root; let #app fill the panel height. */
+#root { height: 100%; }
+
 /* ============================== Toolbar ================================= */
 .bar {
   position: sticky;
@@ -138,6 +141,7 @@ html, body {
 }
 .act:hover { background: var(--accent-wash); border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
 .act:active { transform: translateY(1px); }
+.act:disabled { opacity: 0.45; pointer-events: none; }
 .act svg { color: var(--accent); }
 .act.ghost {
   flex: 0 0 auto;
