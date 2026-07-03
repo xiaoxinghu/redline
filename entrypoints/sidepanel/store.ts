@@ -5,7 +5,7 @@
 // directly in chrome.storage.local:
 //
 //   panel → engine   chrome.tabs.sendMessage(tabId, { cmd, ... })
-//   engine → panel   chrome.runtime.onMessage  { type: "ce:update" | "ce:gone" }
+//   engine → panel   chrome.runtime.onMessage  { type: "rl:update" | "rl:gone" }
 //
 // Everything imperative (messaging, the long-lived close-detection port, tab
 // tracking, export/import) lives here behind reactive signals. Components read
@@ -37,7 +37,7 @@ export function createPanelStore() {
   let myWindowId: number | null = null;
   let targetTabId: number | null = null;
   let active = false; // is the engine running in the target tab?
-  let lastUpdate: UpdateMessage | null = null; // most recent ce:update (current page)
+  let lastUpdate: UpdateMessage | null = null; // most recent rl:update (current page)
   let pendingFlash: { path: string; original: string } | null = null; // flash after navigating
   let panelPort: chrome.runtime.Port | null = null;
   let toastSeq = 0;
@@ -53,7 +53,7 @@ export function createPanelStore() {
   // Lets the background worker tear the engine down when this panel closes.
   function connectPanelPort() {
     try {
-      panelPort = chrome.runtime.connect({ name: 'copyedit-panel' });
+      panelPort = chrome.runtime.connect({ name: 'redline-panel' });
       panelPort.onDisconnect.addListener(() => {
         void chrome.runtime.lastError;
         panelPort = null;
@@ -66,7 +66,7 @@ export function createPanelStore() {
   }
   function reportTarget() {
     if (!panelPort) return;
-    try { panelPort.postMessage({ type: 'copyedit-target', tabId: targetTabId }); } catch {}
+    try { panelPort.postMessage({ type: 'redline-target', tabId: targetTabId }); } catch {}
   }
 
   // ---- messaging ------------------------------------------------------------
@@ -96,7 +96,7 @@ export function createPanelStore() {
     if (!tab.url || isRestricted(tab.url)) {
       targetTabId = null;
       reportTarget();
-      showBlocked("Copy Edit can't run on this page (restricted URL). Open a normal web page and try again.");
+      showBlocked("Redline can't run on this page (restricted URL). Open a normal web page and try again.");
       return;
     }
     targetTabId = tab.id;
@@ -107,8 +107,8 @@ export function createPanelStore() {
       setBlocked(null);
       await sendToTab({ cmd: 'getState' });
     } catch (err) {
-      console.warn('[Copy Edit] could not start on this tab:', err);
-      showBlocked("Couldn't start Copy Edit on this page.");
+      console.warn('[Redline] could not start on this tab:', err);
+      showBlocked("Couldn't start Redline on this page.");
     }
   }
 
@@ -183,7 +183,7 @@ export function createPanelStore() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${slug}.${stamp}.copyedit-bundle.zip`;
+    a.download = `${slug}.${stamp}.redline-bundle.zip`;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -229,8 +229,8 @@ export function createPanelStore() {
       return toast(msg, 'err');
     }
     const { data, assets } = parsed;
-    if (!data || data.format !== 'copy-edit-session' || !data.origin) {
-      return toast("That isn't a Copy Edit changeset.", 'err');
+    if (!data || data.format !== 'redline-session' || !data.origin) {
+      return toast("That isn't a Redline changeset.", 'err');
     }
 
     const sessions = await getSessions();
@@ -304,12 +304,12 @@ export function createPanelStore() {
   chrome.runtime.onMessage.addListener((msg: any, sender) => {
     if (!msg) return;
     if (sender.tab && targetTabId != null && sender.tab.id !== targetTabId) return;
-    if (msg.type === 'ce:update') {
+    if (msg.type === 'rl:update') {
       active = true;
       lastUpdate = msg;
       refresh();
       maybeFlash();
-    } else if (msg.type === 'ce:gone') {
+    } else if (msg.type === 'rl:gone') {
       active = false;
       lastUpdate = null;
     }

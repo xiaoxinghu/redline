@@ -1,4 +1,4 @@
-// Shared domain types for Copy Edit.
+// Shared domain types for Redline.
 //
 // These describe the data contracts that travel between the three runtime
 // contexts (engine ⇄ panel ⇄ storage/export). The DOM-heavy bodies of the
@@ -52,7 +52,7 @@ export interface Session {
   pages: Record<string, Page>;
 }
 
-/** Top-level storage value under `copyedit_sessions`. */
+/** Top-level storage value under `redline_sessions`. */
 export type Sessions = Record<string, Session>;
 
 /** A row the engine reports to the panel for the current page. */
@@ -78,7 +78,7 @@ export interface Group {
 
 /** engine → panel: live state of the current page. */
 export interface UpdateMessage {
-  type: 'ce:update';
+  type: 'rl:update';
   origin: string;
   path: string;
   url: string;
@@ -89,7 +89,7 @@ export interface UpdateMessage {
 
 /** engine → panel: the engine was torn down. */
 export interface GoneMessage {
-  type: 'ce:gone';
+  type: 'rl:gone';
 }
 
 export type EngineToPanel = UpdateMessage | GoneMessage;
@@ -105,6 +105,6 @@ export type PanelCommand =
 
 declare global {
   interface Window {
-    __copyEditTool?: { teardown: () => void; pushUpdate: () => void };
+    __redlineTool?: { teardown: () => void; pushUpdate: () => void };
   }
 }

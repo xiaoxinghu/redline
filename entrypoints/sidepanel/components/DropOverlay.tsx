@@ -6,7 +6,7 @@ export default function DropOverlay(props: { visible: boolean }) {
     <Show when={props.visible}>
       <div class="drop">
         <div class="drop-box">
-          Drop a <u>.copyedit-bundle.zip</u> (or <u>.copyedit-session.json</u>) to apply
+          Drop a <u>.redline-bundle.zip</u> (or <u>.redline-session.json</u>) to apply
         </div>
       </div>
     </Show>

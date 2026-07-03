@@ -10,7 +10,7 @@
 // It is an *unlisted* script (not a manifest content_script): it is only ever
 // loaded on demand by the panel, never auto-injected on page load.
 //
-// SESSIONS (per origin, persisted in chrome.storage.local under copyedit_sessions)
+// SESSIONS (per origin, persisted in chrome.storage.local under redline_sessions)
 //   { "<origin>": { mode, pages: { "<pathname>": { title, url, updatedAt,
 //                                                   changes:[{element,original,edited}] } } } }
 //   On boot we snapshot the pristine page, then re-apply this page's saved
@@ -27,19 +27,19 @@
 // MESSAGING
 //   panel → engine   chrome.tabs.sendMessage(tabId, { cmd, ... })
 //       getState | setMode | locate | remove | reset | teardown
-//   engine → panel   chrome.runtime.sendMessage({ type: "ce:update" | "ce:gone", ... })
+//   engine → panel   chrome.runtime.sendMessage({ type: "rl:update" | "rl:gone", ... })
 
 export default defineUnlistedScript(() => {
   // Already active in this tab → just re-report state and bail (no re-snapshot).
-  if (window.__copyEditTool) {
-    try { window.__copyEditTool.pushUpdate(); } catch {}
+  if (window.__redlineTool) {
+    try { window.__redlineTool.pushUpdate(); } catch {}
     return;
   }
 
-  const UI_ATTR = 'data-ce-ui';
-  const ID_ATTR = 'data-ce-id';
-  const IMG_ID_ATTR = 'data-ce-img-id';
-  const SESSIONS_KEY = 'copyedit_sessions';
+  const UI_ATTR = 'data-rl-ui';
+  const ID_ATTR = 'data-rl-id';
+  const IMG_ID_ATTR = 'data-rl-img-id';
+  const SESSIONS_KEY = 'redline_sessions';
   const SKIP_TAGS = new Set([
     'SCRIPT', 'STYLE', 'NOSCRIPT', 'TEXTAREA', 'CODE', 'PRE', 'SVG', 'CANVAS',
   ]);
@@ -206,7 +206,7 @@ export default defineUnlistedScript(() => {
         const parent = node.parentElement;
         if (!parent || SKIP_TAGS.has(parent.tagName)) return NodeFilter.FILTER_REJECT;
         if (parent.closest(`[${UI_ATTR}]`)) return NodeFilter.FILTER_REJECT;
-        if (parent.closest('.ce-track')) return NodeFilter.FILTER_REJECT; // already tracked
+        if (parent.closest('.rl-track')) return NodeFilter.FILTER_REJECT; // already tracked
         return NodeFilter.FILTER_ACCEPT;
       },
     });
@@ -218,10 +218,10 @@ export default defineUnlistedScript(() => {
     const described = textNodes.map((tn) => [tn, describe(tn)] as const);
 
     for (const [tn, desc] of described) {
-      const id = 'ce-' + idCounter++;
+      const id = 'rl-' + idCounter++;
       const span = document.createElement('span');
       span.setAttribute(ID_ATTR, id);
-      span.className = 'ce-track';
+      span.className = 'rl-track';
       span.textContent = tn.nodeValue;
       originals.set(id, tn.nodeValue);
       currents.set(id, tn.nodeValue);
@@ -276,7 +276,7 @@ export default defineUnlistedScript(() => {
       if (p.op === '=') frag.appendChild(document.createTextNode(p.text));
       else {
         const el = document.createElement(p.op === '+' ? 'ins' : 'del');
-        el.className = p.op === '+' ? 'ce-ins' : 'ce-del';
+        el.className = p.op === '+' ? 'rl-ins' : 'rl-del';
         el.textContent = p.text;
         frag.appendChild(el);
       }
@@ -342,10 +342,10 @@ export default defineUnlistedScript(() => {
     const target = resolveElement(el);
     const ti = el.textIndex ?? 0;
     if (target) {
-      const direct = [...target.children].filter((c: any) => c.matches?.('span.ce-track'));
+      const direct = [...target.children].filter((c: any) => c.matches?.('span.rl-track'));
       const hit = direct[ti];
       if (hit && originals.get(hit.getAttribute(ID_ATTR)) === change.original) return hit;
-      for (const s of target.querySelectorAll('span.ce-track')) {
+      for (const s of target.querySelectorAll('span.rl-track')) {
         if (originals.get(s.getAttribute(ID_ATTR)) === change.original) return s;
       }
     }
@@ -462,7 +462,7 @@ export default defineUnlistedScript(() => {
     if (o.srcset) img.setAttribute('srcset', o.srcset); else img.removeAttribute('srcset');
     if (o.sizes) img.setAttribute('sizes', o.sizes); else img.removeAttribute('sizes');
     if (o.src != null) img.src = o.src;
-    img.classList.remove('ce-img-changed');
+    img.classList.remove('rl-img-changed');
   }
 
   // Both schemes refused: keep the original image visible, flag it with a badge.
@@ -496,7 +496,7 @@ export default defineUnlistedScript(() => {
 
   function setImgOutline(on: boolean) {
     for (const [id, img] of imgEls) {
-      img.classList.toggle('ce-img-changed', !!(on && imgCurrents.get(id)));
+      img.classList.toggle('rl-img-changed', !!(on && imgCurrents.get(id)));
     }
   }
 
@@ -554,7 +554,7 @@ export default defineUnlistedScript(() => {
     const b = document.createElement('div');
     b.setAttribute(UI_ATTR, '');
     b.setAttribute('contenteditable', 'false');
-    b.className = 'ce-img-badge';
+    b.className = 'rl-img-badge';
     b.textContent = '\u26A0 Preview blocked by this site';
     b.title = "This site's security policy (CSP img-src) blocks images we add, so the " +
       "replacement can't display here. It's still saved and included when you export.";
@@ -589,7 +589,7 @@ export default defineUnlistedScript(() => {
 
     imgBtn = document.createElement('button');
     imgBtn.type = 'button';
-    imgBtn.id = 'ce-img-btn';
+    imgBtn.id = 'rl-img-btn';
     imgBtn.setAttribute(UI_ATTR, '');
     imgBtn.setAttribute('contenteditable', 'false');
     imgBtn.textContent = '\u2B06 Replace image';
@@ -661,7 +661,7 @@ export default defineUnlistedScript(() => {
   }
 
   function renderPlain() {
-    document.documentElement.classList.remove('ce-review-mode');
+    document.documentElement.classList.remove('rl-review-mode');
     for (const [id, span] of spans) {
       const t = currents.get(id);
       if (span.textContent !== t) span.textContent = t;
@@ -676,7 +676,7 @@ export default defineUnlistedScript(() => {
       if (cur === orig) span.textContent = cur;
       else span.appendChild(diffFragment(orig, cur));
     }
-    document.documentElement.classList.add('ce-review-mode');
+    document.documentElement.classList.add('rl-review-mode');
   }
 
   // Re-render the page in whatever mode we're currently in (used after we wrap
@@ -699,8 +699,8 @@ export default defineUnlistedScript(() => {
     snapshot();
     applySaved(savedChanges);
     const root = document.documentElement.classList;
-    root.remove('ce-review-mode');
-    root.add('ce-edit-mode');
+    root.remove('rl-review-mode');
+    root.add('rl-edit-mode');
     for (const [id, span] of spans) {
       if (span.textContent !== currents.get(id)) span.textContent = currents.get(id);
     }
@@ -713,7 +713,7 @@ export default defineUnlistedScript(() => {
 
   function enterPreview() {
     if (mode === 'edit') captureEdits();
-    document.documentElement.classList.remove('ce-edit-mode');
+    document.documentElement.classList.remove('rl-edit-mode');
     document.designMode = 'off';
     setInterception(false);
     renderPlain();
@@ -726,7 +726,7 @@ export default defineUnlistedScript(() => {
   function enterDiff() {
     if (mode !== 'diff') preDiffMode = mode;
     if (mode === 'edit') captureEdits();
-    document.documentElement.classList.remove('ce-edit-mode');
+    document.documentElement.classList.remove('rl-edit-mode');
     document.designMode = 'off';
     setInterception(true);
     renderDiff();
@@ -829,22 +829,22 @@ export default defineUnlistedScript(() => {
   function injectFloat() {
     const wrap = document.createElement('div');
     wrap.setAttribute(UI_ATTR, '');
-    wrap.id = 'ce-float';
+    wrap.id = 'rl-float';
     wrap.setAttribute('contenteditable', 'false');
 
     floatDiff = document.createElement('button');
     floatDiff.setAttribute(UI_ATTR, '');
     floatDiff.type = 'button';
-    floatDiff.className = 'ce-toggle';
+    floatDiff.className = 'rl-toggle';
     floatDiff.setAttribute('role', 'switch');
     floatDiff.title = 'Toggle an inline diff overlay of every change';
     const tLabel = document.createElement('span');
-    tLabel.className = 'ce-toggle-label';
+    tLabel.className = 'rl-toggle-label';
     tLabel.textContent = 'Diff';
     const track = document.createElement('span');
-    track.className = 'ce-toggle-track';
+    track.className = 'rl-toggle-track';
     const knob = document.createElement('span');
-    knob.className = 'ce-toggle-knob';
+    knob.className = 'rl-toggle-knob';
     track.appendChild(knob);
     floatDiff.append(tLabel, track);
     floatDiff.addEventListener('click', (e: any) => {
@@ -855,7 +855,7 @@ export default defineUnlistedScript(() => {
     floatPrimary = document.createElement('button');
     floatPrimary.setAttribute(UI_ATTR, '');
     floatPrimary.type = 'button';
-    floatPrimary.className = 'ce-fab ce-fab-primary';
+    floatPrimary.className = 'rl-fab rl-fab-primary';
     floatPrimary.addEventListener('click', (e: any) => {
       e.preventDefault(); e.stopPropagation();
       setMode(floatPrimary.dataset.target || 'edit');
@@ -863,23 +863,23 @@ export default defineUnlistedScript(() => {
 
     floatSep = document.createElement('span');
     floatSep.setAttribute(UI_ATTR, '');
-    floatSep.className = 'ce-sep';
+    floatSep.className = 'rl-sep';
 
     wrap.append(floatPrimary, floatSep, floatDiff);
 
     // Whole-page "you're in a special mode" cue: a fixed, click-through frame
     // that glows around the viewport, plus a status pill at the top edge. Color
-    // is driven by the ce-edit-mode / ce-review-mode classes on <html>.
+    // is driven by the rl-edit-mode / rl-review-mode classes on <html>.
     floatFrame = document.createElement('div');
     floatFrame.setAttribute(UI_ATTR, '');
-    floatFrame.id = 'ce-frame';
+    floatFrame.id = 'rl-frame';
     const label = document.createElement('span');
     label.setAttribute(UI_ATTR, '');
-    label.className = 'ce-frame-label';
+    label.className = 'rl-frame-label';
     const dot = document.createElement('span');
-    dot.className = 'ce-frame-dot';
+    dot.className = 'rl-frame-dot';
     floatFrameText = document.createElement('span');
-    floatFrameText.className = 'ce-frame-text';
+    floatFrameText.className = 'rl-frame-text';
     label.append(dot, floatFrameText);
     floatFrame.appendChild(label);
 
@@ -914,7 +914,7 @@ export default defineUnlistedScript(() => {
   function pushUpdate() {
     renderFloat();
     send({
-      type: 'ce:update',
+      type: 'rl:update',
       origin: ORIGIN,
       path: PATH,
       url: location.href,
@@ -928,15 +928,15 @@ export default defineUnlistedScript(() => {
     const span = spans.get(id);
     if (span) {
       span.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      span.classList.add('ce-flash');
-      setTimeout(() => span.classList.remove('ce-flash'), 1800);
+      span.classList.add('rl-flash');
+      setTimeout(() => span.classList.remove('rl-flash'), 1800);
       return true;
     }
     const img = imgEls.get(id);
     if (img) {
       img.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      img.classList.add('ce-flash');
-      setTimeout(() => img.classList.remove('ce-flash'), 1800);
+      img.classList.add('rl-flash');
+      setTimeout(() => img.classList.remove('rl-flash'), 1800);
       return true;
     }
     return false;
@@ -1016,7 +1016,7 @@ export default defineUnlistedScript(() => {
     if (mode === 'edit') captureEdits();
     try { persist(); } catch {}   // save the page we're leaving (persist captures old PATH)
     PATH = location.pathname;
-    reinitForPage().catch((err) => console.error('[Copy Edit] re-init failed:', err));
+    reinitForPage().catch((err) => console.error('[Redline] re-init failed:', err));
   }
 
   // Drop the previous page's tracking (leaving our own UI intact) and rebuild
@@ -1081,59 +1081,59 @@ export default defineUnlistedScript(() => {
     const style = document.createElement('style');
     style.setAttribute(UI_ATTR, '');
     style.textContent = `
-      .ce-review-mode .ce-track ins.ce-ins { background:#d7f5dd; text-decoration:none; border-radius:2px; box-shadow:0 0 0 1px #9ad8aa inset; }
-      .ce-review-mode .ce-track del.ce-del { background:#ffd9d9; border-radius:2px; box-shadow:0 0 0 1px #f0a9a9 inset; }
-      .ce-track.ce-flash { animation: ce-flash-kf 1.8s ease; }
-      @keyframes ce-flash-kf { 0%,100%{ box-shadow:none; } 15%,60%{ box-shadow:0 0 0 3px #ffd54a, 0 0 12px 4px #ffd54a; background:#fff7d1; } }
+      .rl-review-mode .rl-track ins.rl-ins { background:#d7f5dd; text-decoration:none; border-radius:2px; box-shadow:0 0 0 1px #9ad8aa inset; }
+      .rl-review-mode .rl-track del.rl-del { background:#ffd9d9; border-radius:2px; box-shadow:0 0 0 1px #f0a9a9 inset; }
+      .rl-track.rl-flash { animation: rl-flash-kf 1.8s ease; }
+      @keyframes rl-flash-kf { 0%,100%{ box-shadow:none; } 15%,60%{ box-shadow:0 0 0 3px #ffd54a, 0 0 12px 4px #ffd54a; background:#fff7d1; } }
 
       /* Floating menubar (top-right). Palette mirrors the side panel and adapts
          to light/dark with prefers-color-scheme, just like the panel does. */
-      #ce-float { --ce-surface:rgba(255,255,255,.92); --ce-line:rgba(20,24,40,.10); --ce-ink:#1b1f2a; --ce-hover:rgba(20,24,40,.06); --ce-track:rgba(20,24,40,.22); --ce-shadow:0 10px 30px rgba(20,24,40,.22); --ce-accent-a:#4c7dff; --ce-accent-b:#6f57ff;
-        position:fixed !important; top:16px !important; right:16px !important; z-index:2147483647 !important; display:inline-flex !important; align-items:center !important; gap:4px !important; margin:0 !important; padding:5px !important; border-radius:14px !important; background:var(--ce-surface) !important; -webkit-backdrop-filter:blur(12px) saturate(1.4); backdrop-filter:blur(12px) saturate(1.4); border:1px solid var(--ce-line) !important; box-shadow:var(--ce-shadow) !important; pointer-events:auto !important; }
-      #ce-float .ce-sep { flex:0 0 auto !important; width:1px !important; align-self:stretch !important; margin:3px 2px !important; background:var(--ce-line) !important; }
-      #ce-float .ce-fab { all:unset; box-sizing:border-box; cursor:pointer !important; display:inline-flex !important; align-items:center !important; justify-content:center !important; min-width:62px; padding:9px 16px !important; border-radius:10px !important; color:#fff !important; font:600 13px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif !important; letter-spacing:.2px; transition:filter .14s ease, transform .05s ease; }
-      #ce-float .ce-fab:hover { filter:brightness(1.08); }
-      #ce-float .ce-fab:active { transform:translateY(1px); }
-      #ce-float .ce-fab-primary { background:linear-gradient(135deg,var(--ce-accent-a),var(--ce-accent-b)) !important; }
+      #rl-float { --rl-surface:rgba(255,255,255,.92); --rl-line:rgba(20,24,40,.10); --rl-ink:#1b1f2a; --rl-hover:rgba(20,24,40,.06); --rl-track:rgba(20,24,40,.22); --rl-shadow:0 10px 30px rgba(20,24,40,.22); --rl-accent-a:#4c7dff; --rl-accent-b:#6f57ff;
+        position:fixed !important; top:16px !important; right:16px !important; z-index:2147483647 !important; display:inline-flex !important; align-items:center !important; gap:4px !important; margin:0 !important; padding:5px !important; border-radius:14px !important; background:var(--rl-surface) !important; -webkit-backdrop-filter:blur(12px) saturate(1.4); backdrop-filter:blur(12px) saturate(1.4); border:1px solid var(--rl-line) !important; box-shadow:var(--rl-shadow) !important; pointer-events:auto !important; }
+      #rl-float .rl-sep { flex:0 0 auto !important; width:1px !important; align-self:stretch !important; margin:3px 2px !important; background:var(--rl-line) !important; }
+      #rl-float .rl-fab { all:unset; box-sizing:border-box; cursor:pointer !important; display:inline-flex !important; align-items:center !important; justify-content:center !important; min-width:62px; padding:9px 16px !important; border-radius:10px !important; color:#fff !important; font:600 13px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif !important; letter-spacing:.2px; transition:filter .14s ease, transform .05s ease; }
+      #rl-float .rl-fab:hover { filter:brightness(1.08); }
+      #rl-float .rl-fab:active { transform:translateY(1px); }
+      #rl-float .rl-fab-primary { background:linear-gradient(135deg,var(--rl-accent-a),var(--rl-accent-b)) !important; }
 
       /* iOS-style "Diff" switch (right side of the bar): ON only in diff mode. */
-      #ce-float .ce-toggle { all:unset; box-sizing:border-box; cursor:pointer !important; display:inline-flex !important; align-items:center !important; gap:8px !important; padding:7px 11px !important; border-radius:10px !important; color:var(--ce-ink) !important; font:600 13px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif !important; letter-spacing:.2px; transition:background .14s ease; }
-      #ce-float .ce-toggle:hover { background:var(--ce-hover) !important; }
-      #ce-float .ce-toggle-label { color:var(--ce-ink) !important; }
-      #ce-float .ce-toggle-track { position:relative !important; flex:0 0 auto !important; width:38px !important; height:22px !important; border-radius:999px !important; background:var(--ce-track) !important; transition:background .2s ease; }
-      #ce-float .ce-toggle-knob { position:absolute !important; top:2px !important; left:2px !important; width:18px !important; height:18px !important; border-radius:50% !important; background:#fff !important; box-shadow:0 1px 3px rgba(0,0,0,.3) !important; transition:transform .2s ease; }
-      #ce-float .ce-toggle.is-on .ce-toggle-track { background:linear-gradient(135deg,#f5a623,#f57c00) !important; }
-      #ce-float .ce-toggle.is-on .ce-toggle-knob { transform:translateX(16px); }
+      #rl-float .rl-toggle { all:unset; box-sizing:border-box; cursor:pointer !important; display:inline-flex !important; align-items:center !important; gap:8px !important; padding:7px 11px !important; border-radius:10px !important; color:var(--rl-ink) !important; font:600 13px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif !important; letter-spacing:.2px; transition:background .14s ease; }
+      #rl-float .rl-toggle:hover { background:var(--rl-hover) !important; }
+      #rl-float .rl-toggle-label { color:var(--rl-ink) !important; }
+      #rl-float .rl-toggle-track { position:relative !important; flex:0 0 auto !important; width:38px !important; height:22px !important; border-radius:999px !important; background:var(--rl-track) !important; transition:background .2s ease; }
+      #rl-float .rl-toggle-knob { position:absolute !important; top:2px !important; left:2px !important; width:18px !important; height:18px !important; border-radius:50% !important; background:#fff !important; box-shadow:0 1px 3px rgba(0,0,0,.3) !important; transition:transform .2s ease; }
+      #rl-float .rl-toggle.is-on .rl-toggle-track { background:linear-gradient(135deg,#f5a623,#f57c00) !important; }
+      #rl-float .rl-toggle.is-on .rl-toggle-knob { transform:translateX(16px); }
       @media (prefers-color-scheme: dark) {
-        #ce-float { --ce-surface:rgba(28,31,41,.94); --ce-line:rgba(255,255,255,.12); --ce-ink:#eef1f8; --ce-hover:rgba(255,255,255,.08); --ce-track:rgba(255,255,255,.20); --ce-shadow:0 12px 32px rgba(0,0,0,.5); --ce-accent-a:#6b94ff; --ce-accent-b:#6f57ff; }
+        #rl-float { --rl-surface:rgba(28,31,41,.94); --rl-line:rgba(255,255,255,.12); --rl-ink:#eef1f8; --rl-hover:rgba(255,255,255,.08); --rl-track:rgba(255,255,255,.20); --rl-shadow:0 12px 32px rgba(0,0,0,.5); --rl-accent-a:#6b94ff; --rl-accent-b:#6f57ff; }
       }
 
       /* Whole-page mode cue: a click-through glowing frame + a top-edge pill. */
-      #ce-frame { position:fixed !important; inset:0 !important; z-index:2147483646 !important; pointer-events:none !important; opacity:0; transition:opacity .25s ease; }
-      .ce-edit-mode #ce-frame, .ce-review-mode #ce-frame { opacity:1; }
-      .ce-edit-mode #ce-frame { animation:ce-frame-breathe 3.4s ease-in-out infinite; }
-      .ce-review-mode #ce-frame { box-shadow: inset 0 0 0 3px rgba(245,160,35,.95), inset 0 0 24px 4px rgba(245,124,0,.30) !important; }
-      @keyframes ce-frame-breathe {
+      #rl-frame { position:fixed !important; inset:0 !important; z-index:2147483646 !important; pointer-events:none !important; opacity:0; transition:opacity .25s ease; }
+      .rl-edit-mode #rl-frame, .rl-review-mode #rl-frame { opacity:1; }
+      .rl-edit-mode #rl-frame { animation:rl-frame-breathe 3.4s ease-in-out infinite; }
+      .rl-review-mode #rl-frame { box-shadow: inset 0 0 0 3px rgba(245,160,35,.95), inset 0 0 24px 4px rgba(245,124,0,.30) !important; }
+      @keyframes rl-frame-breathe {
         0%,100% { box-shadow: inset 0 0 0 3px rgba(108,99,255,.80), inset 0 0 22px 3px rgba(76,125,255,.28); }
         50%     { box-shadow: inset 0 0 0 3px rgba(124,108,255,1), inset 0 0 44px 9px rgba(76,125,255,.52); }
       }
-      #ce-frame .ce-frame-label { position:absolute !important; top:0 !important; left:50% !important; transform:translateX(-50%) !important; display:none; align-items:center; gap:7px; padding:6px 15px 7px !important; border-radius:0 0 12px 12px !important; color:#fff !important; font:700 12px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif !important; letter-spacing:.3px !important; white-space:nowrap !important; box-shadow:0 6px 18px rgba(20,24,40,.3) !important; }
-      .ce-edit-mode #ce-frame .ce-frame-label, .ce-review-mode #ce-frame .ce-frame-label { display:flex !important; }
-      .ce-edit-mode #ce-frame .ce-frame-label { background:linear-gradient(135deg,#4c7dff,#6f57ff) !important; }
-      .ce-review-mode #ce-frame .ce-frame-label { background:linear-gradient(135deg,#f5a623,#f57c00) !important; }
-      #ce-frame .ce-frame-dot { width:7px; height:7px; border-radius:50% !important; background:#fff !important; animation:ce-frame-dot 1.6s ease-out infinite; }
-      @keyframes ce-frame-dot { 0%{ box-shadow:0 0 0 0 rgba(255,255,255,.65);} 70%{ box-shadow:0 0 0 6px rgba(255,255,255,0);} 100%{ box-shadow:0 0 0 0 rgba(255,255,255,0);} }
+      #rl-frame .rl-frame-label { position:absolute !important; top:0 !important; left:50% !important; transform:translateX(-50%) !important; display:none; align-items:center; gap:7px; padding:6px 15px 7px !important; border-radius:0 0 12px 12px !important; color:#fff !important; font:700 12px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif !important; letter-spacing:.3px !important; white-space:nowrap !important; box-shadow:0 6px 18px rgba(20,24,40,.3) !important; }
+      .rl-edit-mode #rl-frame .rl-frame-label, .rl-review-mode #rl-frame .rl-frame-label { display:flex !important; }
+      .rl-edit-mode #rl-frame .rl-frame-label { background:linear-gradient(135deg,#4c7dff,#6f57ff) !important; }
+      .rl-review-mode #rl-frame .rl-frame-label { background:linear-gradient(135deg,#f5a623,#f57c00) !important; }
+      #rl-frame .rl-frame-dot { width:7px; height:7px; border-radius:50% !important; background:#fff !important; animation:rl-frame-dot 1.6s ease-out infinite; }
+      @keyframes rl-frame-dot { 0%{ box-shadow:0 0 0 0 rgba(255,255,255,.65);} 70%{ box-shadow:0 0 0 6px rgba(255,255,255,0);} 100%{ box-shadow:0 0 0 0 rgba(255,255,255,0);} }
       @media (prefers-reduced-motion: reduce) {
-        .ce-edit-mode #ce-frame { animation:none; box-shadow: inset 0 0 0 3px rgba(108,99,255,.9), inset 0 0 26px 4px rgba(76,125,255,.4) !important; }
-        #ce-frame .ce-frame-dot { animation:none; }
+        .rl-edit-mode #rl-frame { animation:none; box-shadow: inset 0 0 0 3px rgba(108,99,255,.9), inset 0 0 26px 4px rgba(76,125,255,.4) !important; }
+        #rl-frame .rl-frame-dot { animation:none; }
       }
 
       /* Image edit: hover "Replace" button, blocked-preview badge, diff outline. */
-      img.ce-flash { animation: ce-flash-kf 1.8s ease; }
-      .ce-review-mode img.ce-img-changed { outline:3px solid #f5a623 !important; outline-offset:2px; box-shadow:0 0 0 6px rgba(245,160,35,.28) !important; }
-      #ce-img-btn { position:fixed !important; z-index:2147483647 !important; display:none; align-items:center !important; gap:6px !important; margin:0 !important; padding:8px 12px !important; border:0 !important; border-radius:9px !important; cursor:pointer !important; color:#fff !important; font:600 12px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif !important; letter-spacing:.2px; background:linear-gradient(135deg,#4c7dff,#6f57ff) !important; box-shadow:0 6px 18px rgba(20,24,40,.32) !important; }
-      #ce-img-btn:hover { filter:brightness(1.08); }
-      .ce-img-badge { position:fixed !important; z-index:2147483647 !important; max-width:230px !important; padding:6px 10px !important; border-radius:8px !important; background:rgba(20,24,40,.92) !important; color:#fff !important; font:600 11px/1.35 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif !important; box-shadow:0 6px 18px rgba(0,0,0,.38) !important; pointer-events:auto !important; }
+      img.rl-flash { animation: rl-flash-kf 1.8s ease; }
+      .rl-review-mode img.rl-img-changed { outline:3px solid #f5a623 !important; outline-offset:2px; box-shadow:0 0 0 6px rgba(245,160,35,.28) !important; }
+      #rl-img-btn { position:fixed !important; z-index:2147483647 !important; display:none; align-items:center !important; gap:6px !important; margin:0 !important; padding:8px 12px !important; border:0 !important; border-radius:9px !important; cursor:pointer !important; color:#fff !important; font:600 12px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif !important; letter-spacing:.2px; background:linear-gradient(135deg,#4c7dff,#6f57ff) !important; box-shadow:0 6px 18px rgba(20,24,40,.32) !important; }
+      #rl-img-btn:hover { filter:brightness(1.08); }
+      .rl-img-badge { position:fixed !important; z-index:2147483647 !important; max-width:230px !important; padding:6px 10px !important; border-radius:8px !important; background:rgba(20,24,40,.92) !important; color:#fff !important; font:600 11px/1.35 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif !important; box-shadow:0 6px 18px rgba(0,0,0,.38) !important; pointer-events:auto !important; }
     `;
     document.head.appendChild(style);
     return style;
@@ -1178,7 +1178,7 @@ export default defineUnlistedScript(() => {
     // panel right after a keystroke, before the debounced persist fired).
     try { persist(); } catch {}
     document.designMode = 'off';
-    document.documentElement.classList.remove('ce-review-mode', 'ce-edit-mode');
+    document.documentElement.classList.remove('rl-review-mode', 'rl-edit-mode');
     for (const span of spans.values()) {
       const id = span.getAttribute(ID_ATTR);
       const text = document.createTextNode(originals.has(id) ? originals.get(id) : span.textContent);
@@ -1205,8 +1205,8 @@ export default defineUnlistedScript(() => {
     imgInput && imgInput.remove();
     imgBtn = imgInput = null; imgBtnId = null;
     pageStyle && pageStyle.remove();
-    delete window.__copyEditTool;
-    send({ type: 'ce:gone' });
+    delete window.__redlineTool;
+    send({ type: 'rl:gone' });
   }
 
   async function boot() {
@@ -1220,7 +1220,7 @@ export default defineUnlistedScript(() => {
     window.addEventListener('scroll', positionOverlays, true);
     window.addEventListener('resize', positionOverlays, true);
     chrome.runtime.onMessage.addListener(onMessage);
-    window.__copyEditTool = { teardown, pushUpdate };
+    window.__redlineTool = { teardown, pushUpdate };
     watchNavigation();
 
     const sessions = await getSessions();
@@ -1234,7 +1234,7 @@ export default defineUnlistedScript(() => {
   }
 
   boot().catch((err) => {
-    console.error('[Copy Edit] failed to start:', err);
+    console.error('[Redline] failed to start:', err);
     try { teardown(); } catch {}
   });
 });

@@ -14,19 +14,19 @@ export default defineBackground(() => {
   // Open the side panel when the user clicks the toolbar icon.
   chrome.sidePanel
     .setPanelBehavior({ openPanelOnActionClick: true })
-    .catch((err) => console.error('[Copy Edit] setPanelBehavior failed:', err));
+    .catch((err) => console.error('[Redline] setPanelBehavior failed:', err));
 
   // Side-panel close detection. The side panel opens a long-lived port on load
-  // and keeps us told which tab it's driving (copyedit-target). When the panel
+  // and keeps us told which tab it's driving (redline-target). When the panel
   // document unloads — closed via the toolbar icon, the ✕, or by switching to
   // another panel — the port disconnects. That's our signal to return the page
   // to normal by tearing the engine down in the panel's current target tab. The
   // saved session stays in storage and re-applies next time the panel opens.
   chrome.runtime.onConnect.addListener((port) => {
-    if (port.name !== 'copyedit-panel') return;
+    if (port.name !== 'redline-panel') return;
     let tabId: number | null = null;
     port.onMessage.addListener((msg) => {
-      if (msg && msg.type === 'copyedit-target') {
+      if (msg && msg.type === 'redline-target') {
         tabId = typeof msg.tabId === 'number' ? msg.tabId : null;
       }
     });

@@ -1,5 +1,5 @@
 {
-  "name": "copy-edit",
+  "name": "redline",
   "description": "Edit any page text inline from a side panel, see a live list of changes with inline diffs, and share a machine-readable changeset a developer or coding agent can re-apply.",
   "private": true,
   "version": "0.2.0",

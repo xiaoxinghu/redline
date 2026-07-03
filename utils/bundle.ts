@@ -1,4 +1,4 @@
-// bundle.ts — the Copy Edit export/import file format.
+// bundle.ts — the Redline export/import file format.
 //
 // A bundle is a .zip: a `changeset.json` describing every text/image change for
 // an origin, plus the replacement images under `assets/` (referenced by name).
@@ -83,15 +83,15 @@ export function buildExport(origin: string, session: Session | null): ExportResu
   const changeCount = outPages.reduce((n, p) => n + p.changes.length, 0);
 
   const out = {
-    format: 'copy-edit-session',
+    format: 'redline-session',
     version: 2,
     readme:
-      'Copy Edit bundle — text + image changes a content editor made across one site. ' +
+      'Redline bundle — text + image changes a content editor made across one site. ' +
       'Text changes carry the exact `original`/`edited` strings. Image changes carry the ' +
       'original `original` src and a `file` pointing at the replacement image under assets/ ' +
       'in this zip. To locate in source: search the codebase for the `original` text (for ' +
       'images, use `element.selector`/`element.componentHint`/`element.attributes`). ' +
-      'Re-import this .zip into Copy Edit to re-apply.',
+      'Re-import this .zip into Redline to re-apply.',
     origin,
     exportedAt: new Date().toISOString(),
     summary: { pageCount: outPages.length, changeCount, imageCount: imgCount },

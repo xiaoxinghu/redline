@@ -1,6 +1,6 @@
 // zip.ts — a tiny, dependency-free ZIP reader/writer for the side panel.
 //
-// Copy Edit exports an image-bearing changeset as a .zip "bundle": a
+// Redline exports an image-bearing changeset as a .zip "bundle": a
 // `changeset.json` plus the replacement images under `assets/`, referenced by
 // filename. Images (PNG/JPG/WebP…) are already compressed, so we use the ZIP
 // "store" method (no deflate) — same size, far less code, and the archive still

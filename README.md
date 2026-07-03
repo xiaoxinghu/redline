@@ -1,4 +1,4 @@
-# Copy Edit — inline diff + changeset (Chrome extension)
+# Redline — inline diff + changeset (Chrome extension)
 
 A Manifest V3 Chrome extension that lets a **content editor change web-page copy
 and images in place** from a **side panel**, then exports a **machine-readable
@@ -15,7 +15,7 @@ Content editor (their machine)              Developer (their machine)
 ────────────────────────────────           ─────────────────────────────────
 1. Click the toolbar icon → side panel      4. Open the SAME page/URL
 2. Edit text directly on the page           5. Click the icon → side panel
-3. Share ─► page.<ts>.copyedit.json ──────► 6. Drag the file onto the panel
+3. Share ─► page.<ts>.redline.json ──────► 6. Drag the file onto the panel
    (also copied to clipboard)                  or Import it
                                             7. Changes re-apply as an inline
                                                diff + the panel lists each one
@@ -27,7 +27,7 @@ Both use the File API — **no special permissions**, no `file://`, no file-type
 association:
 
 1. **Import** button → file picker.
-2. **Drag** the `.copyedit-bundle.zip` onto the **side panel** (a drop overlay
+2. **Drag** the `.redline-bundle.zip` onto the **side panel** (a drop overlay
    appears). Share also copies the JSON manifest to the clipboard.
 
 ### Location-aware apply
@@ -46,7 +46,7 @@ kept in the session and travels in the export bundle as a real file under
 ### Preview adapts to the site's security policy
 A replaced image can only be shown on the page through a `data:`/`blob:` URL, and
 a site's **`img-src` Content-Security-Policy** decides whether the browser will
-load those. Copy Edit probes the live page once per origin and picks the best
+load those. Redline probes the live page once per origin and picks the best
 scheme it actually allows:
 
 1. **`data:`** on the real `<img>` (most sites — full fidelity), else
@@ -68,8 +68,8 @@ of the panel is a **live list of every change** (with inline diffs).
 | Toolbar control | What it does |
 |-----------------|--------------|
 | **Edit / Review** | Segmented toggle. *Edit*: `designMode = "on"`, edit text in place with no markup; hovering any image shows a **Replace image** button. *Review*: editing off, each changed run renders inline `<ins>`/`<del>` and each replaced image gets an outline. |
-| **Share** | Download the changeset as a `*.copyedit-bundle.zip` (also copies the JSON manifest to the clipboard). |
-| **Import** | Load a `*.copyedit-bundle.zip` (or a legacy `*.copyedit-session.json`) via file picker and re-apply it (drag-and-drop onto the panel also works). |
+| **Share** | Download the changeset as a `*.redline-bundle.zip` (also copies the JSON manifest to the clipboard). |
+| **Import** | Load a `*.redline-bundle.zip` (or a legacy `*.redline-session.json`) via file picker and re-apply it (drag-and-drop onto the panel also works). |
 | **Done** | Stop editing and remove the in-page markup (your text edits stay). |
 
 **Reset = reload.** There is no Reset button — edits live only in memory, so a
@@ -79,13 +79,13 @@ re-activates fresh against it.
 Switching the active tab re-points the panel at the new tab; reloading the page
 re-activates the engine automatically.
 
-## The changeset format (`*.copyedit-bundle.zip`)
+## The changeset format (`*.redline-bundle.zip`)
 
 The deliverable is a **zip bundle** — designed to round-trip *and* to be read by
 a coding agent:
 
 ```
-acme-example-com.2026-06-25-12-00-00.copyedit-bundle.zip
+acme-example-com.2026-06-25-12-00-00.redline-bundle.zip
 ├── changeset.json        ← the machine-readable manifest (below)
 └── assets/
     ├── img-1.png          ← replacement images, referenced by `file`
@@ -98,7 +98,7 @@ carry the original `original` src plus a `file` pointing at the replacement in
 
 ```jsonc
 {
-  "format": "copy-edit-session",
+  "format": "redline-session",
   "version": 2,
   "readme": "…how to re-apply and how to locate the source in code…",
   "origin": "https://acme.example.com",
@@ -161,7 +161,7 @@ carry the original `original` src plus a `file` pointing at the replacement in
 - The UI is a **side panel page** (`entrypoints/sidepanel/`). It has no access
   to the page DOM, so it injects the **engine** (`entrypoints/engine.ts`, built
   to `/engine.js`) into the active tab via `chrome.scripting.executeScript` and
-  talks to it over messaging (`chrome.tabs.sendMessage` →, `ce:update` ←). The
+  talks to it over messaging (`chrome.tabs.sendMessage` →, `rl:update` ←). The
   panel renders the toolbar + the live change list; the engine does all DOM
   work. The engine is an **unlisted script** — only ever injected on demand,
   never auto-run on page load.
@@ -170,7 +170,7 @@ carry the original `original` src plus a `file` pointing at the replacement in
   just to place the caret and edit its text — without triggering navigation or
   app behaviour. Caret placement and double-click word-select still work.
 - On activation it **snapshots** every meaningful text node by wrapping it in a
-  `<span data-ce-id>` (wrapping *text nodes*, not whole elements, preserves the
+  `<span data-rl-id>` (wrapping *text nodes*, not whole elements, preserves the
   page's inline structure — links, `<strong>`, etc.).
 - All element descriptors (`selector`, `domPath`, attributes, context) are
   computed on the **pristine DOM before wrapping**, so paths stay valid.
@@ -238,7 +238,7 @@ WXT bundles `entrypoints/` into the extension; `manifest.json` is generated.
   preview, export/import + location-aware apply. No UI of its own beyond a
   floating mode toggle + the image hover button.
 - `utils/zip.ts` — a tiny dependency-free ZIP reader/writer (store method) used
-  by the panel to build and read the `*.copyedit-bundle.zip` export.
+  by the panel to build and read the `*.redline-bundle.zip` export.
 - `utils/bundle.ts` — builds/reads the export bundle (zip + image bytes) on top
   of `zip.ts`; `utils/diff.ts` — the word-level diff shared by the UI + export;
   `utils/sessions.ts` — per-origin `chrome.storage.local` session helpers.

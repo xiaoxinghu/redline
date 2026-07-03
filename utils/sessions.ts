@@ -4,7 +4,7 @@
 
 import type { Sessions, Session } from '@/utils/types';
 
-export const SESSIONS_KEY = 'copyedit_sessions';
+export const SESSIONS_KEY = 'redline_sessions';
 
 export function getSessions(): Promise<Sessions> {
   return new Promise((res) => {

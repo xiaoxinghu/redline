@@ -11,9 +11,9 @@ import { defineConfig } from 'wxt';
 export default defineConfig({
   modules: ['@wxt-dev/module-solid'],
   manifest: {
-    name: 'Copy Edit — inline diff',
+    name: 'Redline — inline diff',
     action: {
-      default_title: 'Copy Edit: open the editor side panel',
+      default_title: 'Redline: open the editor side panel',
     },
     permissions: [
       'scripting',
