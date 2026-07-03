@@ -1,0 +1,12 @@
+<svg width="128" height="128" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
+  <!-- Redline icon: a line of copy with a bold red strikethrough (an edit). -->
+  <rect x="0" y="0" width="128" height="128" rx="27" fill="#FFFFFF"/>
+  <!-- lines of text -->
+  <g fill="#AEB4BD">
+    <rect x="28" y="32" width="72" height="12" rx="6"/>
+    <rect x="28" y="58" width="72" height="12" rx="6"/>
+    <rect x="28" y="84" width="46" height="12" rx="6"/>
+  </g>
+  <!-- the redline: strikes through the middle line and extends past it -->
+  <rect x="18" y="59" width="92" height="10" rx="5" fill="#E23B33"/>
+</svg>
