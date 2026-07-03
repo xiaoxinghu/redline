@@ -3,10 +3,10 @@
   <rect x="0" y="0" width="128" height="128" rx="27" fill="#FFFFFF"/>
   <!-- lines of text -->
   <g fill="#AEB4BD">
-    <rect x="28" y="32" width="72" height="12" rx="6"/>
-    <rect x="28" y="58" width="72" height="12" rx="6"/>
-    <rect x="28" y="84" width="46" height="12" rx="6"/>
+    <rect x="28" y="26.5" width="72" height="15" rx="7.5"/>
+    <rect x="28" y="56.5" width="72" height="15" rx="7.5"/>
+    <rect x="28" y="86.5" width="46" height="15" rx="7.5"/>
   </g>
   <!-- the redline: strikes through the middle line and extends past it -->
-  <rect x="18" y="59" width="92" height="10" rx="5" fill="#E23B33"/>
+  <rect x="18" y="55.5" width="92" height="17" rx="8.5" fill="#E23B33"/>
 </svg>
