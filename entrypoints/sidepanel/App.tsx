@@ -51,23 +51,39 @@ export default function App() {
       <div id="app">
         <Toolbar onImport={openFilePicker} />
         <Show
-          when={store.blocked()}
+          when={store.needsGrant()}
           fallback={
             <Show
-              when={store.groups().length}
+              when={store.blocked()}
               fallback={
-                <StateMessage
-                  art="✎"
-                  title="No changes yet"
-                  sub="Click any text on the page and start typing. Edits are saved per site and reappear as you browse."
-                />
+                <Show
+                  when={store.groups().length}
+                  fallback={
+                    <StateMessage
+                      art="✎"
+                      title="No changes yet"
+                      sub="Click any text on the page and start typing. Edits are saved per site and reappear as you browse."
+                    />
+                  }
+                >
+                  <ChangeList />
+                </Show>
               }
             >
-              <ChangeList />
+              <StateMessage art="⊘" title="Can't run here" sub={store.blocked()!} />
             </Show>
           }
         >
-          <StateMessage art="⊘" title="Can't run here" sub={store.blocked()!} />
+          <StateMessage
+            art="🔒"
+            title="Enable Redline on this site"
+            sub={
+              store.needsGrant()!.host
+                ? `Grant Redline permission to edit ${store.needsGrant()!.host}. Your changes stay in this browser — nothing is sent anywhere.`
+                : 'Grant Redline permission to edit this page. Your changes stay in this browser — nothing is sent anywhere.'
+            }
+            action={{ label: 'Enable Redline here', onClick: () => store.grantAccess() }}
+          />
         </Show>
       </div>
 

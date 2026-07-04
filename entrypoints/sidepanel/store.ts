@@ -30,6 +30,10 @@ export function createPanelStore() {
   // ---- reactive state -------------------------------------------------------
   const [status, setStatus] = createSignal('—');
   const [blocked, setBlocked] = createSignal<string | null>(null);
+  // When set, Redline has no access to the current tab yet and the panel shows
+  // an "Enable Redline on this site" prompt (host access is requested at runtime,
+  // not at install). `host` is the site name to show, or null if unknown.
+  const [needsGrant, setNeedsGrant] = createSignal<{ host: string | null } | null>(null);
   const [groups, setGroups] = createSignal<Group[]>([]);
   const [toasts, setToasts] = createSignal<Toast[]>([]);
 
@@ -41,6 +45,10 @@ export function createPanelStore() {
   let pendingFlash: { path: string; original: string } | null = null; // flash after navigating
   let panelPort: chrome.runtime.Port | null = null;
   let toastSeq = 0;
+  // Origin pattern (e.g. "https://example.com/*") to request when the user clicks
+  // "Enable"; null means the tab's URL is unknown, so request broad optional
+  // access to discover it at runtime.
+  let pendingGrant: string | null = null;
 
   // ---- toasts ---------------------------------------------------------------
   function toast(message: string, kind?: 'err') {
@@ -84,32 +92,120 @@ export function createPanelStore() {
     });
   }
 
+  // ---- host access ----------------------------------------------------------
+  // Redline holds no host permissions at install. Access to a page comes from
+  // either (a) activeTab — the tab the user opened the panel on, which also
+  // covers same-origin reloads/navigation — or (b) a per-origin grant the user
+  // approves at runtime, which additionally lets edits follow across that site's
+  // tabs. We try to inject regardless; if we have no access we ask the user.
+  function originPatternOf(url: string): string | null {
+    try {
+      const u = new URL(url);
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+      return `${u.protocol}//${u.host}/*`;
+    } catch {
+      return null;
+    }
+  }
+  function hostOf(url: string): string | null {
+    try { return new URL(url).host; } catch { return null; }
+  }
+  function hasOriginPermission(pattern: string): Promise<boolean> {
+    return new Promise((res) => {
+      try {
+        chrome.permissions.contains({ origins: [pattern] }, (r) => {
+          void chrome.runtime.lastError;
+          res(!!r);
+        });
+      } catch {
+        res(false);
+      }
+    });
+  }
+  function injectEngine(tabId: number): Promise<boolean> {
+    return chrome.scripting
+      .executeScript({ target: { tabId }, files: ['engine.js'] })
+      .then(() => true)
+      .catch(() => false);
+  }
+  // Best-effort (Chrome 133+): surface Chrome's native "grant access to this
+  // site" affordance on the toolbar icon. Accepting it upgrades the temporary
+  // activeTab session into a persistent per-origin grant, so edits keep
+  // following across the site's tabs and reloads. A no-op on older Chrome.
+  function requestNativeHostAccess(tabId: number) {
+    try {
+      const api = chrome.permissions as any;
+      if (typeof api.addHostAccessRequest === 'function') {
+        api.addHostAccessRequest({ tabId }).catch(() => {});
+      }
+    } catch {}
+  }
+
   // ---- activation -----------------------------------------------------------
   // Inject the engine into the active tab, then sync state. While the panel is
   // open the tool is always active; closing the panel is how you stop.
   async function enterTab(tab?: chrome.tabs.Tab) {
     if (!tab || tab.id == null) {
+      setNeedsGrant(null);
       showBlocked('No active tab to edit.');
-      return;
-    }
-    // No readable URL usually means a privileged page we have no host access to.
-    if (!tab.url || isRestricted(tab.url)) {
-      targetTabId = null;
-      reportTarget();
-      showBlocked("Redline can't run on this page (restricted URL). Open a normal web page and try again.");
       return;
     }
     targetTabId = tab.id;
     reportTarget();
-    try {
-      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['engine.js'] });
+
+    // tab.url is only populated for tabs we can already access (activeTab or a
+    // granted origin); otherwise it's empty and we let injection be the probe.
+    const url = tab.url || (tab as any).pendingUrl || '';
+    if (url && isRestricted(url)) {
+      active = false;
+      setNeedsGrant(null);
+      showBlocked("Redline can't run on this page (restricted URL). Open a normal web page and try again.");
+      return;
+    }
+
+    const pattern = originPatternOf(url);
+    const persistent = pattern ? await hasOriginPermission(pattern) : false;
+
+    // Try to inject: a granted per-origin permission or activeTab authorises it.
+    if (await injectEngine(tab.id)) {
       active = true;
+      pendingGrant = null;
+      setNeedsGrant(null);
       setBlocked(null);
       await sendToTab({ cmd: 'getState' });
-    } catch (err) {
-      console.warn('[Redline] could not start on this tab:', err);
-      showBlocked("Couldn't start Redline on this page.");
+      // Injected via activeTab only (no lasting grant): invite the user to grant
+      // persistent access so edits follow across this site's tabs and reloads.
+      if (!persistent) requestNativeHostAccess(tab.id);
+      return;
     }
+
+    // No access to this tab yet — ask the user to enable Redline on this site.
+    active = false;
+    pendingGrant = pattern;
+    setBlocked(null);
+    setStatus('—');
+    setNeedsGrant({ host: hostOf(url) });
+  }
+
+  // Called from a user gesture (the panel's "Enable" button). Requests host
+  // access to the current site, then re-enters the active tab.
+  async function grantAccess() {
+    const origins = pendingGrant ? [pendingGrant] : ['http://*/*', 'https://*/*'];
+    let granted = false;
+    try {
+      granted = await chrome.permissions.request({ origins });
+    } catch {
+      granted = false;
+    }
+    if (!granted) {
+      toast('Redline needs access to this site to edit it.', 'err');
+      return;
+    }
+    setNeedsGrant(null);
+    const [tab] = await chrome.tabs.query(
+      myWindowId != null ? { active: true, windowId: myWindowId } : { active: true, currentWindow: true }
+    );
+    await enterTab(tab);
   }
 
   async function init() {
@@ -340,6 +436,7 @@ export function createPanelStore() {
     // state
     status,
     blocked,
+    needsGrant,
     groups,
     toasts,
     // lifecycle
@@ -348,6 +445,7 @@ export function createPanelStore() {
     doExport,
     doClear,
     applyFile,
+    grantAccess,
     locate,
     gotoChange,
     removeChange,

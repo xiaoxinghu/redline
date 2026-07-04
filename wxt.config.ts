@@ -8,6 +8,12 @@ import { defineConfig } from "wxt";
 //   - entrypoints/engine.ts          -> /engine.js (unlisted script, injected on demand
 //                                       by the side panel via chrome.scripting.executeScript)
 // The rest (name, action, permissions, host permissions) is declared here.
+//
+// HOST ACCESS — Redline ships with *no* host permissions at install time (no
+// install-time "read and change all your data on all websites" warning). It
+// leans on `activeTab` for the tab the user opens the panel on, and requests
+// access to the specific site the user chooses to edit at runtime from
+// `optional_host_permissions` (see entrypoints/sidepanel/store.ts).
 export default defineConfig({
 	modules: ["@wxt-dev/module-solid"],
 	manifest: {
@@ -26,6 +32,7 @@ export default defineConfig({
 			"sidePanel",
 			"unlimitedStorage",
 		],
-		host_permissions: ["http://*/*", "https://*/*"],
+		// Requested per-site at runtime (never at install) — see store.ts.
+		optional_host_permissions: ["http://*/*", "https://*/*"],
 	},
 });

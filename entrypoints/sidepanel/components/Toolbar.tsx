@@ -2,8 +2,8 @@ import { usePanel } from '../store';
 
 /** Brand + status pill + the Export / Import / Clear actions. */
 export default function Toolbar(props: { onImport: () => void }) {
-  const { status, blocked, doExport, doClear } = usePanel();
-  const disabled = () => blocked() != null;
+  const { status, blocked, needsGrant, doExport, doClear } = usePanel();
+  const disabled = () => blocked() != null || needsGrant() != null;
 
   return (
     <header class="bar">
