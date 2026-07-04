@@ -29,6 +29,8 @@
 //       getState | setMode | locate | remove | reset | teardown
 //   engine → panel   chrome.runtime.sendMessage({ type: "rl:update" | "rl:gone", ... })
 
+import { createImageReplacer } from '@/utils/image-replace';
+
 export default defineUnlistedScript(() => {
   // Already active in this tab → just re-report state and bail (no re-snapshot).
   if (window.__redlineTool) {
@@ -54,17 +56,23 @@ export default defineUnlistedScript(() => {
   let orphans: any[] = [];       // saved changes that couldn't be applied here
   let savedChanges: any[] = [];  // this page's saved edits, for re-applying to late content
 
-  // Image replacement registry (parallel to the text maps above). Images are
-  // mutated in place rather than wrapped, so we track them by their own id.
-  const imgEls = new Map();        // id -> <img>
-  const imgOriginals = new Map();  // id -> { src, srcset, sizes, alt } (pristine)
-  const imgCurrents = new Map();   // id -> { dataUrl, fileName, fileType } (replacement)
-  const imgDescriptors = new Map();// id -> element identity (computed pristine)
-  const imgBlocked = new Set();    // ids whose preview the page's CSP refused
-
   let mode = 'edit';             // edit | preview | diff
   let preDiffMode = 'edit';      // mode to return to when the Diff switch is off
   let idCounter = 0;
+
+  // Image replacement lives in its own module (utils/image-replace.ts). Images
+  // are mutated in place rather than wrapped, so the module keeps its own
+  // registry and re-asserts replacements the page tries to clobber.
+  const images = createImageReplacer({
+    IMG_ID_ATTR, UI_ATTR,
+    nextId: () => 'ceimg-' + idCounter++,
+    describeElement,
+    resolveElement,
+    getMode: () => mode,
+    addOrphan: (r) => { orphans.push(r); },
+    persist,
+    pushUpdate,
+  });
 
   // ======================================================================
   // Element identity helpers (computed on the PRISTINE DOM, pre-wrapping)
@@ -198,7 +206,7 @@ export default defineUnlistedScript(() => {
   // ======================================================================
   function snapshot() {
     allHeadings = [...document.querySelectorAll('h1,h2,h3,h4,h5,h6')];
-    snapshotImages();
+    images.scan();
 
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
       acceptNode(node) {
@@ -363,7 +371,7 @@ export default defineUnlistedScript(() => {
   function applySaved(changes: any[]) {
     orphans = [];
     for (const change of changes || []) {
-      if (change.kind === 'image') { applyOneImage(change); continue; }
+      if (change.kind === 'image') { images.restoreSavedChange(change); continue; }
       const span = findSpanForChange(change);
       if (span && originals.get(span.getAttribute(ID_ATTR)) === change.original) {
         currents.set(span.getAttribute(ID_ATTR), change.edited);
@@ -371,269 +379,6 @@ export default defineUnlistedScript(() => {
         orphans.push({ element: change.element || {}, original: change.original, edited: change.edited });
       }
     }
-  }
-
-  // ======================================================================
-  // 4b. Images  (replace any <img> in place; preview adapts to the site's CSP)
-  //
-  // Images aren't wrapped like text — we mutate the <img> directly and keep a
-  // parallel registry (imgEls/imgOriginals/imgCurrents/imgDescriptors). A
-  // replacement is stored as a data: URL so it round-trips through storage and
-  // the export bundle; the on-page PREVIEW picks the best scheme the page's CSP
-  // actually allows, probed once per origin:
-  //   data:  -> set <img src> to the data: URL            (most sites)
-  //   blob:  -> set <img src> to an object URL             (data: blocked)
-  //   none   -> keep the original image, show a badge       (both blocked)
-  // ======================================================================
-  const PROBE_PNG =
-    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC';
-
-  function probeImg(src: string): Promise<boolean> {
-    return new Promise((resolve) => {
-      const im = new Image();
-      let done = false;
-      const fin = (v: boolean) => { if (!done) { done = true; resolve(v); } };
-      im.onload = () => fin(im.naturalWidth > 0);
-      im.onerror = () => fin(false);
-      setTimeout(() => fin(false), 1500);
-      im.src = src;
-    });
-  }
-
-  let _imgScheme: string | undefined; // undefined until probed; then "data" | "blob" | "none"
-  async function getImgScheme() {
-    if (_imgScheme !== undefined) return _imgScheme;
-    if (await probeImg(PROBE_PNG)) return (_imgScheme = 'data');
-    let url = null;
-    try {
-      url = URL.createObjectURL(dataUrlToBlob(PROBE_PNG, 'image/png'));
-      _imgScheme = (await probeImg(url)) ? 'blob' : 'none';
-    } catch { _imgScheme = 'none'; }
-    finally { if (url) URL.revokeObjectURL(url); }
-    return _imgScheme;
-  }
-
-  function dataUrlToBlob(dataUrl: string, type?: string) {
-    const comma = dataUrl.indexOf(',');
-    const meta = dataUrl.slice(0, comma);
-    const bin = atob(dataUrl.slice(comma + 1));
-    const arr = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-    const mime = type || (meta.match(/data:([^;]+)/) || [])[1] || 'image/png';
-    return new Blob([arr], { type: mime });
-  }
-
-  const blobUrls = new Map(); // id -> object URL (revoke on change/teardown)
-  function ensureBlobUrl(id: string, cur: any) {
-    revokeBlob(id);
-    const u = URL.createObjectURL(dataUrlToBlob(cur.dataUrl, cur.fileType));
-    blobUrls.set(id, u);
-    return u;
-  }
-  function revokeBlob(id: string) {
-    const u = blobUrls.get(id);
-    if (u) { URL.revokeObjectURL(u); blobUrls.delete(id); }
-  }
-
-  // Tag every untracked <img> (idempotent — safe to re-run for late content).
-  function snapshotImages() {
-    for (const img of document.querySelectorAll('img')) {
-      if (img.closest(`[${UI_ATTR}]`)) continue;
-      if (img.hasAttribute(IMG_ID_ATTR)) continue;
-      const id = 'ceimg-' + idCounter++;
-      img.setAttribute(IMG_ID_ATTR, id);
-      imgEls.set(id, img);
-      imgOriginals.set(id, {
-        src: img.currentSrc || img.getAttribute('src') || img.src || '',
-        srcset: img.getAttribute('srcset'),
-        sizes: img.getAttribute('sizes'),
-        alt: img.getAttribute('alt'),
-      });
-      imgDescriptors.set(id, describeElement(img));
-    }
-  }
-
-  function restoreImgAttrs(id: string) {
-    const img = imgEls.get(id), o = imgOriginals.get(id);
-    revokeBlob(id);
-    removeBadge(id);
-    if (!img || !o) return;
-    img.onerror = null;
-    if (o.srcset) img.setAttribute('srcset', o.srcset); else img.removeAttribute('srcset');
-    if (o.sizes) img.setAttribute('sizes', o.sizes); else img.removeAttribute('sizes');
-    if (o.src != null) img.src = o.src;
-    img.classList.remove('rl-img-changed');
-  }
-
-  // Both schemes refused: keep the original image visible, flag it with a badge.
-  function applyBlocked(id: string) {
-    const img = imgEls.get(id), o = imgOriginals.get(id);
-    revokeBlob(id);
-    if (img && o) { img.onerror = null; if (o.src != null) img.src = o.src; }
-    imgBlocked.add(id);
-    showBadge(id);
-  }
-
-  async function setImgPreview(id: string) {
-    const img = imgEls.get(id);
-    const cur = imgCurrents.get(id);
-    if (!img) return;
-    if (!cur) { restoreImgAttrs(id); imgBlocked.delete(id); return; }
-    const scheme = await getImgScheme();
-    if (!imgEls.has(id) || imgCurrents.get(id) !== cur) return; // changed mid-await
-    img.removeAttribute('srcset');
-    img.removeAttribute('sizes');
-    if (scheme === 'none') { applyBlocked(id); return; }
-    imgBlocked.delete(id);
-    removeBadge(id);
-    img.onerror = () => { img.onerror = null; applyBlocked(id); pushUpdate(); };
-    img.src = scheme === 'blob' ? ensureBlobUrl(id, cur) : cur.dataUrl;
-  }
-
-  function renderImages() {
-    for (const id of imgCurrents.keys()) setImgPreview(id);
-  }
-
-  function setImgOutline(on: boolean) {
-    for (const [id, img] of imgEls) {
-      img.classList.toggle('rl-img-changed', !!(on && imgCurrents.get(id)));
-    }
-  }
-
-  function replaceImageFromFile(id: string, file: File) {
-    if (!file || !/^image\//.test(file.type)) return;
-    const reader = new FileReader();
-    reader.onload = async () => {
-      imgCurrents.set(id, { dataUrl: String(reader.result), fileName: file.name, fileType: file.type });
-      await setImgPreview(id);
-      setImgOutline(mode === 'diff');
-      await persist();
-      pushUpdate();
-    };
-    reader.readAsDataURL(file);
-  }
-
-  // For storage/export: one record per replaced image.
-  function buildImageChanges() {
-    const out = [];
-    for (const [id, cur] of imgCurrents) {
-      if (!cur) continue;
-      const o = imgOriginals.get(id) || {};
-      out.push({
-        kind: 'image',
-        element: imgDescriptors.get(id),
-        original: o.src || '',
-        edited: cur.dataUrl,
-        alt: o.alt || null,
-        fileName: cur.fileName || null,
-        fileType: cur.fileType || null,
-      });
-    }
-    return out;
-  }
-
-  function applyOneImage(change: any) {
-    const target = resolveElement(change.element || {});
-    if (target && target.tagName === 'IMG' && target.hasAttribute(IMG_ID_ATTR)) {
-      imgCurrents.set(target.getAttribute(IMG_ID_ATTR), {
-        dataUrl: change.edited, fileName: change.fileName, fileType: change.fileType,
-      });
-    } else {
-      orphans.push({
-        kind: 'image', element: change.element || {},
-        original: change.original, edited: change.edited,
-        fileName: change.fileName, fileType: change.fileType,
-      });
-    }
-  }
-
-  // --- Blocked-preview badge + hover "Replace image" button ----------------
-  const badges = new Map(); // id -> badge element
-  function showBadge(id: string) {
-    if (badges.has(id)) return;
-    const b = document.createElement('div');
-    b.setAttribute(UI_ATTR, '');
-    b.setAttribute('contenteditable', 'false');
-    b.className = 'rl-img-badge';
-    b.textContent = '\u26A0 Preview blocked by this site';
-    b.title = "This site's security policy (CSP img-src) blocks images we add, so the " +
-      "replacement can't display here. It's still saved and included when you export.";
-    document.body.appendChild(b);
-    badges.set(id, b);
-    positionBadge(id);
-  }
-  function removeBadge(id: string) { const b = badges.get(id); if (b) { b.remove(); badges.delete(id); } }
-  function removeAllBadges() { for (const b of badges.values()) b.remove(); badges.clear(); }
-  function positionBadge(id: string) {
-    const b = badges.get(id), img = imgEls.get(id);
-    if (!b || !img) return;
-    const r = img.getBoundingClientRect();
-    b.style.left = Math.max(6, r.left + 6) + 'px';
-    b.style.top = Math.max(6, r.top + 6) + 'px';
-  }
-
-  let imgBtn: any = null, imgInput: any = null, imgBtnId: string | null = null, pendingImgId: string | null = null;
-  function injectImgUI() {
-    imgInput = document.createElement('input');
-    imgInput.type = 'file';
-    imgInput.accept = 'image/*';
-    imgInput.setAttribute(UI_ATTR, '');
-    imgInput.style.display = 'none';
-    imgInput.addEventListener('change', () => {
-      const f = imgInput.files && imgInput.files[0];
-      const id = pendingImgId;   // captured at click time — hover/hide can't clear it
-      pendingImgId = null;
-      imgInput.value = '';
-      if (f && id) replaceImageFromFile(id, f);
-    });
-
-    imgBtn = document.createElement('button');
-    imgBtn.type = 'button';
-    imgBtn.id = 'rl-img-btn';
-    imgBtn.setAttribute(UI_ATTR, '');
-    imgBtn.setAttribute('contenteditable', 'false');
-    imgBtn.textContent = '\u2B06 Replace image';
-    imgBtn.style.display = 'none';
-    imgBtn.addEventListener('click', (e: any) => {
-      e.preventDefault(); e.stopPropagation();
-      if (!imgBtnId) return;
-      pendingImgId = imgBtnId;   // remember the target before the dialog steals hover
-      imgInput.click();
-    });
-
-    document.body.append(imgInput, imgBtn);
-  }
-
-  function positionImgBtn() {
-    const img = imgEls.get(imgBtnId);
-    if (!img) return hideImgBtn();
-    const r = img.getBoundingClientRect();
-    if (r.width < 1 || r.bottom < 0 || r.top > innerHeight) return hideImgBtn();
-    imgBtn.style.left = Math.max(6, r.right - imgBtn.offsetWidth - 8) + 'px';
-    imgBtn.style.top = Math.max(6, r.top + 8) + 'px';
-  }
-  function showImgBtn(img: any) {
-    imgBtnId = img.getAttribute(IMG_ID_ATTR);
-    imgBtn.style.display = 'inline-flex';
-    positionImgBtn();
-  }
-  function hideImgBtn() { if (imgBtn) imgBtn.style.display = 'none'; imgBtnId = null; }
-
-  function onImgHover(e: any) {
-    if (mode !== 'edit') return;
-    const t = e.target;
-    if (t && t.tagName === 'IMG' && t.hasAttribute(IMG_ID_ATTR)) showImgBtn(t);
-  }
-  function onImgOut(e: any) {
-    if (mode !== 'edit') return;
-    const to = e.relatedTarget;
-    if (to === imgBtn) return;
-    if (to && to.tagName === 'IMG' && to.hasAttribute(IMG_ID_ATTR)) return;
-    hideImgBtn();
-  }
-  function positionOverlays() {
-    if (imgBtn && imgBtn.style.display !== 'none') positionImgBtn();
-    for (const id of badges.keys()) positionBadge(id);
   }
 
   // ======================================================================
@@ -706,8 +451,8 @@ export default defineUnlistedScript(() => {
     }
     document.designMode = 'on';
     setInterception(true);
-    renderImages();
-    setImgOutline(false);
+    images.render();
+    images.setOutline(false);
     mode = 'edit';
   }
 
@@ -717,9 +462,9 @@ export default defineUnlistedScript(() => {
     document.designMode = 'off';
     setInterception(false);
     renderPlain();
-    renderImages();
-    setImgOutline(false);
-    hideImgBtn();
+    images.render();
+    images.setOutline(false);
+    images.hideButton();
     mode = 'preview';
   }
 
@@ -730,9 +475,9 @@ export default defineUnlistedScript(() => {
     document.designMode = 'off';
     setInterception(true);
     renderDiff();
-    renderImages();
-    setImgOutline(true);
-    hideImgBtn();
+    images.render();
+    images.setOutline(true);
+    images.hideButton();
     mode = 'diff';
   }
 
@@ -775,7 +520,7 @@ export default defineUnlistedScript(() => {
       original: originals.get(id),
       edited: currentText(id),
     }));
-    return applied.concat(buildImageChanges() as any, orphans);
+    return applied.concat(images.serializeChanges() as any, orphans);
   }
 
   // For the panel: current-page rows with live status + ids for Locate.
@@ -795,20 +540,7 @@ export default defineUnlistedScript(() => {
       edited: c.edited,
       element: c.element || {},
     }));
-    const imgRows = [];
-    for (const [id, cur] of imgCurrents) {
-      if (!cur) continue;
-      imgRows.push({
-        id,
-        status: 'applied',
-        kind: 'image',
-        previewBlocked: imgBlocked.has(id),
-        original: (imgOriginals.get(id) || {}).src || '',
-        edited: cur.dataUrl,
-        element: imgDescriptors.get(id),
-      });
-    }
-    return rows.concat(imgRows as any, warn as any);
+    return rows.concat(images.serializeRows() as any, warn as any);
   }
 
   // ======================================================================
@@ -932,14 +664,7 @@ export default defineUnlistedScript(() => {
       setTimeout(() => span.classList.remove('rl-flash'), 1800);
       return true;
     }
-    const img = imgEls.get(id);
-    if (img) {
-      img.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      img.classList.add('rl-flash');
-      setTimeout(() => img.classList.remove('rl-flash'), 1800);
-      return true;
-    }
-    return false;
+    return images.flash(id);
   }
 
   // Live updates: while editing, recompute + persist as the user types.
@@ -958,11 +683,8 @@ export default defineUnlistedScript(() => {
     if (payload.id != null && spans.has(payload.id)) {
       currents.set(payload.id, originals.get(payload.id));
       spans.get(payload.id).textContent = originals.get(payload.id);
-    } else if (payload.id != null && imgEls.has(payload.id)) {
-      restoreImgAttrs(payload.id);
-      imgCurrents.delete(payload.id);
-      imgBlocked.delete(payload.id);
-      setImgOutline(mode === 'diff');
+    } else if (payload.id != null && images.revert(payload.id)) {
+      // handled by the image module
     } else {
       orphans = orphans.filter(
         (o) => !(o.original === payload.original && o.edited === payload.edited)
@@ -976,11 +698,7 @@ export default defineUnlistedScript(() => {
   // Does NOT persist — the panel has already removed the session from storage.
   function reset() {
     for (const [id, original] of originals) currents.set(id, original);
-    for (const id of [...imgCurrents.keys()]) restoreImgAttrs(id);
-    imgCurrents.clear();
-    imgBlocked.clear();
-    removeAllBadges();
-    setImgOutline(false);
+    images.revertAll();
     orphans = [];
     savedChanges = [];
     renderCurrentMode();
@@ -1029,9 +747,7 @@ export default defineUnlistedScript(() => {
       span.parentNode && span.parentNode.replaceChild(text, span);
     }
     spans.clear(); originals.clear(); currents.clear(); descriptors.clear(); orphans = [];
-    for (const id of [...imgEls.keys()]) { restoreImgAttrs(id); const im = imgEls.get(id); im && im.removeAttribute(IMG_ID_ATTR); }
-    imgEls.clear(); imgOriginals.clear(); imgCurrents.clear(); imgDescriptors.clear(); imgBlocked.clear();
-    removeAllBadges(); hideImgBtn();
+    images.clearPage();
 
     snapshot();
     const sessions = await getSessions();
@@ -1048,13 +764,13 @@ export default defineUnlistedScript(() => {
   function augment() {
     if (mode === 'edit') captureEdits();
     const beforeText = spans.size;
-    const beforeImg = imgEls.size;
+    const beforeImg = images.count();
     snapshot();
-    if (spans.size === beforeText && imgEls.size === beforeImg) return; // nothing new
+    if (spans.size === beforeText && images.count() === beforeImg) return; // nothing new
     if (mode !== 'edit') applySaved(savedChanges);
     renderCurrentMode();
-    renderImages();
-    setImgOutline(mode === 'diff');
+    images.render();
+    images.setOutline(mode === 'diff');
     pushUpdate();
   }
 
@@ -1081,8 +797,15 @@ export default defineUnlistedScript(() => {
     const style = document.createElement('style');
     style.setAttribute(UI_ATTR, '');
     style.textContent = `
-      .rl-review-mode .rl-track ins.rl-ins { background:#d7f5dd; text-decoration:none; border-radius:2px; box-shadow:0 0 0 1px #9ad8aa inset; }
-      .rl-review-mode .rl-track del.rl-del { background:#ffd9d9; border-radius:2px; box-shadow:0 0 0 1px #f0a9a9 inset; }
+      /* Inline diff runs must stay legible on ANY page, including dark themes
+         where the surrounding text is white. We force both the light wash AND a
+         dark ink (color + -webkit-text-fill-color, since gradient/clipped text
+         sites use the latter), reset inherited text-shadow, and add a
+         color-independent cue: underline for insertions, strike for deletions. */
+      .rl-review-mode .rl-track ins.rl-ins,
+      .rl-review-mode .rl-track del.rl-del { border-radius:2px; padding:0 1px; text-shadow:none !important; }
+      .rl-review-mode .rl-track ins.rl-ins { background:#d7f5dd !important; color:#0b5a2b !important; -webkit-text-fill-color:#0b5a2b !important; text-decoration:underline !important; text-decoration-color:#2e9c58 !important; text-underline-offset:2px; box-shadow:0 0 0 1px #6fc389 inset; }
+      .rl-review-mode .rl-track del.rl-del { background:#ffd9d9 !important; color:#8a1020 !important; -webkit-text-fill-color:#8a1020 !important; text-decoration:line-through !important; text-decoration-color:#d05656 !important; box-shadow:0 0 0 1px #ea9797 inset; }
       .rl-track.rl-flash { animation: rl-flash-kf 1.8s ease; }
       @keyframes rl-flash-kf { 0%,100%{ box-shadow:none; } 15%,60%{ box-shadow:0 0 0 3px #ffd54a, 0 0 12px 4px #ffd54a; background:#fff7d1; } }
 
@@ -1185,25 +908,16 @@ export default defineUnlistedScript(() => {
       span.parentNode && span.parentNode.replaceChild(text, span);
     }
     spans.clear(); originals.clear(); currents.clear(); descriptors.clear(); orphans = [];
-    for (const id of [...imgEls.keys()]) { restoreImgAttrs(id); const im = imgEls.get(id); im && im.removeAttribute(IMG_ID_ATTR); }
-    imgEls.clear(); imgOriginals.clear(); imgCurrents.clear(); imgDescriptors.clear(); imgBlocked.clear();
-    removeAllBadges();
-    for (const u of blobUrls.values()) { try { URL.revokeObjectURL(u); } catch {} }
-    blobUrls.clear();
+    images.destroy();
     setInterception(false);
     unwatchNavigation();
     document.removeEventListener('input', onInput, true);
-    document.removeEventListener('mouseover', onImgHover, true);
-    document.removeEventListener('mouseout', onImgOut, true);
-    window.removeEventListener('scroll', positionOverlays, true);
-    window.removeEventListener('resize', positionOverlays, true);
+    window.removeEventListener('scroll', images.reposition, true);
+    window.removeEventListener('resize', images.reposition, true);
     try { chrome.runtime.onMessage.removeListener(onMessage); } catch {}
     floatEl && floatEl.remove();
     floatFrame && floatFrame.remove();
     floatEl = floatPrimary = floatDiff = floatSep = floatFrame = floatFrameText = null;
-    imgBtn && imgBtn.remove();
-    imgInput && imgInput.remove();
-    imgBtn = imgInput = null; imgBtnId = null;
     pageStyle && pageStyle.remove();
     delete window.__redlineTool;
     send({ type: 'rl:gone' });
@@ -1213,12 +927,10 @@ export default defineUnlistedScript(() => {
     snapshot();
     pageStyle = injectPageStyle();
     floatEl = injectFloat();
-    injectImgUI();
+    images.setup();
     document.addEventListener('input', onInput, true);
-    document.addEventListener('mouseover', onImgHover, true);
-    document.addEventListener('mouseout', onImgOut, true);
-    window.addEventListener('scroll', positionOverlays, true);
-    window.addEventListener('resize', positionOverlays, true);
+    window.addEventListener('scroll', images.reposition, true);
+    window.addEventListener('resize', images.reposition, true);
     chrome.runtime.onMessage.addListener(onMessage);
     window.__redlineTool = { teardown, pushUpdate };
     watchNavigation();

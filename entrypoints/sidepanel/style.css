@@ -299,8 +299,8 @@ html, body {
   color: var(--ink);
   word-break: break-word;
 }
-.mini ins { background: var(--ins-bg); color: var(--ins-ink); text-decoration: none; border-radius: 3px; padding: 0 1px; }
-.mini del { background: var(--del-bg); color: var(--del-ink); border-radius: 3px; padding: 0 1px; }
+.mini ins { background: var(--ins-bg); color: var(--ins-ink); -webkit-text-fill-color: var(--ins-ink); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--ins-ink) 55%, transparent); text-underline-offset: 2px; text-shadow: none; border-radius: 3px; padding: 0 1px; }
+.mini del { background: var(--del-bg); color: var(--del-ink); -webkit-text-fill-color: var(--del-ink); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--del-ink) 55%, transparent); text-shadow: none; border-radius: 3px; padding: 0 1px; }
 
 /* Image change: before -> after thumbnails */
 .mini.img {

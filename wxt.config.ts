@@ -1,4 +1,4 @@
-import { defineConfig } from 'wxt';
+import { defineConfig } from "wxt";
 
 // See https://wxt.dev/api/config.html
 //
@@ -9,19 +9,23 @@ import { defineConfig } from 'wxt';
 //                                       by the side panel via chrome.scripting.executeScript)
 // The rest (name, action, permissions, host permissions) is declared here.
 export default defineConfig({
-  modules: ['@wxt-dev/module-solid'],
-  manifest: {
-    name: 'Redline — inline diff',
-    action: {
-      default_title: 'Redline: open the editor side panel',
-    },
-    permissions: [
-      'scripting',
-      'activeTab',
-      'storage',
-      'sidePanel',
-      'unlimitedStorage',
-    ],
-    host_permissions: ['http://*/*', 'https://*/*'],
-  },
+	modules: ["@wxt-dev/module-solid"],
+	manifest: {
+		name: "Redline — inline diff",
+		// Chrome Web Store caps manifest description at 132 chars.
+		// (package.json's longer description would otherwise be used.)
+		description:
+			"Edit page text inline from a side panel, track changes with live inline diffs, and share a machine-readable changeset to re-apply.",
+		action: {
+			default_title: "Redline: open the editor side panel",
+		},
+		permissions: [
+			"scripting",
+			"activeTab",
+			"storage",
+			"sidePanel",
+			"unlimitedStorage",
+		],
+		host_permissions: ["http://*/*", "https://*/*"],
+	},
 });

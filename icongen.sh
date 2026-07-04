@@ -31,7 +31,7 @@ if [[ $# -lt 1 || $# -gt 2 ]]; then
 fi
 
 SRC=$1
-OUT_DIR=${2:-icons}
+OUT_DIR=${2:-public/icon}
 
 [[ -f "$SRC" ]] || die "source image not found: $SRC"
 command -v sips >/dev/null 2>&1 || die "'sips' not found (this script targets macOS)"
