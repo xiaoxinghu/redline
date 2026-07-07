@@ -93,3 +93,5 @@ jobs:
           name: redline-${{ needs.check-version.outputs.version }}-chrome
           path: .output/*-chrome.zip
           if-no-files-found: error
+          # .output is a hidden dir (leading dot); include it explicitly.
+          include-hidden-files: true
