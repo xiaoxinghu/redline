@@ -675,6 +675,42 @@ export default defineUnlistedScript(() => {
     pushTimer = setTimeout(async () => { await persist(); pushUpdate(); }, 250);
   }
 
+  // Keep typed text INSIDE the element being edited.
+  //
+  // contenteditable/designMode deliberately pushes text typed at the start or
+  // end of a hyperlink OUT of it (so you're never "trapped" typing inside a
+  // link). For a link styled as a button — [ login ] — typing at the end lands
+  // *after* </a>: [ login ]to. <summary> behaves the same. Plain buttons/inline
+  // tags don't, so we only step in for those two hosts, and only at the text
+  // boundaries where the escape happens — everywhere else the native path runs
+  // untouched (preserving its undo history). At beforeinput the caret is still
+  // correctly inside our span, so we cancel the default and splice it in.
+  const ESCAPE_HOSTS = 'a, summary';
+  function onBeforeInput(e: any) {
+    if (mode !== 'edit') return;
+    if (e.inputType !== 'insertText' || e.data == null) return;
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount) return;
+    const range = sel.getRangeAt(0);
+    if (!range.collapsed) return;                       // selections/replacements: leave to the browser
+    const node: any = range.startContainer;
+    if (node.nodeType !== Node.TEXT_NODE) return;
+    const parent = node.parentElement;
+    if (!parent || !parent.closest('span.rl-track')) return; // only our tracked text
+    const off = range.startOffset;
+    if (off !== 0 && off !== node.nodeValue.length) return;   // only the boundaries that escape
+    if (!parent.closest(ESCAPE_HOSTS)) return;               // only escape-prone hosts
+    e.preventDefault();
+    const v = node.nodeValue;
+    node.nodeValue = v.slice(0, off) + e.data + v.slice(off);
+    const r = document.createRange();
+    r.setStart(node, off + e.data.length);
+    r.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(r);
+    onInput(); // we bypassed the default, so drive the live-update path ourselves
+  }
+
   // ======================================================================
   // 8. Mutations driven by the panel
   // ======================================================================
@@ -912,6 +948,7 @@ export default defineUnlistedScript(() => {
     setInterception(false);
     unwatchNavigation();
     document.removeEventListener('input', onInput, true);
+    document.removeEventListener('beforeinput', onBeforeInput, true);
     window.removeEventListener('scroll', images.reposition, true);
     window.removeEventListener('resize', images.reposition, true);
     try { chrome.runtime.onMessage.removeListener(onMessage); } catch {}
@@ -929,6 +966,7 @@ export default defineUnlistedScript(() => {
     floatEl = injectFloat();
     images.setup();
     document.addEventListener('input', onInput, true);
+    document.addEventListener('beforeinput', onBeforeInput, true);
     window.addEventListener('scroll', images.reposition, true);
     window.addEventListener('resize', images.reposition, true);
     chrome.runtime.onMessage.addListener(onMessage);
