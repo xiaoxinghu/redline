@@ -24,3 +24,8 @@ web-ext.config.ts
 *.njsproj
 *.sln
 *.sw?
+
+# WXT store submission secrets
+.env.submit
+.env.submit.backup-*
+.secrets
