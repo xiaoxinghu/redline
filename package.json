@@ -2,7 +2,7 @@
 	"name": "redline",
 	"description": "Edit any page text inline from a side panel, see a live list of changes with inline diffs, and share a machine-readable changeset a developer or coding agent can re-apply.",
 	"private": true,
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"type": "module",
 	"scripts": {
 		"dev": "wxt",
